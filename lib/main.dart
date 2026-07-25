@@ -162,6 +162,7 @@ class _GamePageState extends State<GamePage>
   double _score = 0;
   int _coinsCollected = 0;
   int _best = 0;
+  bool _isNewBest = false; // did the last run beat the all-time best?
   double _shakeT = 0;
   double _swipeDx = 0;
   double _swipeDy = 0;
@@ -496,6 +497,7 @@ class _GamePageState extends State<GamePage>
   void _crash() {
     if (_phase != Phase.playing) return;
     final int s = _score.round();
+    _isNewBest = s > _best; // beats the all-time best
     _best = math.max(_best, s);
     _shakeT = shakeDuration;
     _spawnParticles(_runnerX, groundY + _jumpY, runnerZ, 22, 0xFFE0533D, 5.0, 5.0);
@@ -544,6 +546,7 @@ class _GamePageState extends State<GamePage>
         _scores
           ..clear()
           ..addAll(loaded.take(5));
+        _best = _scores.isNotEmpty ? _scores.first.score : 0;
       });
     } catch (_) {
       // ignore load errors — start with an empty board
@@ -1006,11 +1009,28 @@ class _GamePageState extends State<GamePage>
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                const SizedBox(height: 4),
+                _bestLine(),
                 _powerChips(),
               ],
             );
           },
         ),
+      ),
+    );
+  }
+
+  Widget _bestLine() {
+    final int cur = _score.round();
+    final bool beating = _best > 0 && cur > _best;
+    if (_best <= 0 && !beating) return const SizedBox.shrink();
+    return Text(
+      beating ? '★  NEW BEST' : 'BEST  $_best',
+      style: TextStyle(
+        color: beating ? cGold : Colors.white38,
+        fontSize: 13,
+        fontWeight: beating ? FontWeight.w800 : FontWeight.w600,
+        letterSpacing: beating ? 1.5 : 0.5,
       ),
     );
   }
@@ -1174,6 +1194,18 @@ class _GamePageState extends State<GamePage>
               ),
             ),
             const SizedBox(height: 12),
+            if (_isNewBest) ...<Widget>[
+              const Text(
+                '★  NEW BEST!',
+                style: TextStyle(
+                  color: cGold,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 1,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             Text(
               'Score  ${_score.round()}      Best  $_best',
               style: const TextStyle(
@@ -1244,12 +1276,44 @@ class _GamePageState extends State<GamePage>
           ),
         ],
       ),
+      const SizedBox(height: 12),
+      OutlinedButton.icon(
+        onPressed: _shareScore,
+        icon: const Icon(Icons.share, size: 18),
+        label: const Text('SHARE SCORE'),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: cTeal,
+          side: const BorderSide(color: Color(0x554FD1C5)),
+          padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 12),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+      ),
       const SizedBox(height: 10),
       const Text(
         'Space  play again    ·    M  menu',
         style: TextStyle(color: Colors.white38, fontSize: 13),
       ),
     ];
+  }
+
+  Future<void> _shareScore() async {
+    final int s = _score.round();
+    final String text =
+        'I scored $s in flutter-scene-runner — a 3D endless runner I built '
+        'from scratch in Flutter (Flutter GPU / Impeller), no game engine.\n\n'
+        'Play it: https://saqrelfirgany.github.io/flutter-scene-runner/\n'
+        '#Flutter #GameDev';
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Score copied — paste it anywhere to share!'),
+        duration: Duration(seconds: 2),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+    _focus.requestFocus();
   }
 
   Widget _primaryButton(String label, VoidCallback onTap) {
