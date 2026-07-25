@@ -13,7 +13,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-macOS-555" />
 </p>
 
-**أحمد صقر الفرجاني** — Senior Flutter Engineer
+**أحمد  الفرجاني** — Senior Flutter Engineer
 <br/>
 <a href="https://github.com/saqrelfirgany">GitHub</a> • <a href="https://www.linkedin.com/in/ahmed-elfirgany-a71635396/">LinkedIn</a>
 
@@ -107,7 +107,7 @@ fvm flutter run -d macos --enable-flutter-gpu --enable-impeller
 
 ## عن المطوّر
 
-**أحمد صقر الفرجاني** — مهندس برمجيات موبايل أول (Senior Flutter Engineer)، خبرة أكثر من **5 سنين** في بناء تطبيقات Flutter قابلة للتوسّع.
+**أحمد  الفرجاني** — مهندس برمجيات موبايل أول (Senior Flutter Engineer)، خبرة أكثر من **5 سنين** في بناء تطبيقات Flutter قابلة للتوسّع.
 
 - **+22 تطبيق** إنتاجي على iOS و Android · **+200 ألف مستخدم**
 - خبرة عبر **5 مجالات** (عقارات، تجارة إلكترونية، رعاية صحية، موارد بشرية، فنتك) و**5 دول** — مصر، **السعودية، الإمارات، الكويت**، وتركيا
@@ -120,4 +120,4 @@ fvm flutter run -d macos --enable-flutter-gpu --enable-impeller
 
 </div>
 
-<div align="center"><sub>صُنع بواسطة أحمد صقر الفرجاني · flutter-scene-runner · 2026</sub></div>
+<div align="center"><sub>صُنع بواسطة أحمد  الفرجاني · flutter-scene-runner · 2026</sub></div>
