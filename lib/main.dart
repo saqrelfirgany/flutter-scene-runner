@@ -89,6 +89,11 @@ class _GamePageState extends State<GamePage>
   static const Color cRed = Color(0xFFE0533D);
   static const Color cBg = Color(0xFF0E1220);
 
+  // --- juice (Day 3B) -----------------------------------------------------
+  static const int particleCount = 48;
+  static const double particleGravity = 16.0;
+  static const double shakeDuration = 0.4;
+
   final Scene _scene = Scene();
   final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
   final FocusNode _focus = FocusNode();
@@ -111,6 +116,7 @@ class _GamePageState extends State<GamePage>
   double _score = 0;
   int _coinsCollected = 0;
   int _best = 0;
+  double _shakeT = 0;
 
   // --- leaderboard (in-memory for now) ------------------------------------
   final List<_Score> _scores = <_Score>[];
@@ -129,6 +135,7 @@ class _GamePageState extends State<GamePage>
   final List<Node> _dashesR = <Node>[];
   final List<_Obstacle> _obstacles = <_Obstacle>[];
   final List<_Coin> _coins = <_Coin>[];
+  final List<_Particle> _particles = <_Particle>[];
   late final Node _runner;
 
   static double _laneX(int lane) => -lane * laneWidth;
@@ -150,6 +157,8 @@ class _GamePageState extends State<GamePage>
         : (elapsed - _last).inMicroseconds / Duration.microsecondsPerSecond;
     _last = elapsed;
     if (dt > 0.05) dt = 0.05;
+    if (_shakeT > 0) _shakeT = math.max(0, _shakeT - dt);
+    _updateParticles(dt);
     _update(dt);
     _repaint.value++;
   }
@@ -220,6 +229,7 @@ class _GamePageState extends State<GamePage>
         c.active = false;
         _coinsCollected++;
         _score += coinScore;
+        _spawnParticles(_laneX(c.lane), coinY, c.z, 7, 0xFFFFC93C, 3.5, 3.0);
       }
     }
   }
@@ -267,6 +277,45 @@ class _GamePageState extends State<GamePage>
     return dx < 1.0 && dy < 1.8 && dz < 0.9;
   }
 
+  void _spawnParticles(double x, double y, double z, int count, int colorHex,
+      double spread, double lift) {
+    for (int n = 0; n < count; n++) {
+      final _Particle? p = _freeParticle();
+      if (p == null) return;
+      p.active = true;
+      p.pos.setValues(x, y, z);
+      final double ang = _rng.nextDouble() * math.pi * 2;
+      final double sp = spread * (0.4 + _rng.nextDouble());
+      p.vel.setValues(math.cos(ang) * sp, lift * (0.6 + _rng.nextDouble()),
+          math.sin(ang) * sp);
+      p.maxLife = 0.5 + _rng.nextDouble() * 0.35;
+      p.life = p.maxLife;
+      p.material.baseColorFactor = _linearFromHex(colorHex);
+    }
+  }
+
+  _Particle? _freeParticle() {
+    for (final _Particle p in _particles) {
+      if (!p.active) return p;
+    }
+    return null;
+  }
+
+  void _updateParticles(double dt) {
+    for (final _Particle p in _particles) {
+      if (!p.active) continue;
+      p.life -= dt;
+      if (p.life <= 0) {
+        p.active = false;
+        continue;
+      }
+      p.vel.y -= particleGravity * dt;
+      p.pos.x += p.vel.x * dt;
+      p.pos.y += p.vel.y * dt;
+      p.pos.z += p.vel.z * dt;
+    }
+  }
+
   bool _isHighScore(int s) =>
       s > 0 && (_scores.length < 5 || s > _scores.last.score);
 
@@ -274,6 +323,8 @@ class _GamePageState extends State<GamePage>
     if (_phase != Phase.playing) return;
     final int s = _score.round();
     _best = math.max(_best, s);
+    _shakeT = shakeDuration;
+    _spawnParticles(_runnerX, groundY + _jumpY, runnerZ, 22, 0xFFE0533D, 5.0, 5.0);
     final bool high = _isHighScore(s);
     setState(() {
       _phase = Phase.crashed;
@@ -353,6 +404,10 @@ class _GamePageState extends State<GamePage>
     for (final _Coin c in _coins) {
       c.active = false;
     }
+    for (final _Particle p in _particles) {
+      p.active = false;
+    }
+    _shakeT = 0;
   }
 
   void _startGame() {
@@ -459,6 +514,15 @@ class _GamePageState extends State<GamePage>
       _coins.add(_Coin(n));
       _scene.add(n);
     }
+    for (int i = 0; i < particleCount; i++) {
+      final UnlitMaterial mat = UnlitMaterial()
+        ..baseColorFactor = _linearFromHex(0xFFFFC93C);
+      final Node n =
+          Node(mesh: Mesh(CuboidGeometry(vm.Vector3(0.18, 0.18, 0.18)), mat));
+      _particles.add(_Particle(n, mat));
+      _scene.add(n);
+    }
+
     _runner = _box(vm.Vector3(1.0, 1.0, 1.0), debug: true);
     _scene.add(_runner);
   }
@@ -497,6 +561,17 @@ class _GamePageState extends State<GamePage>
           },
           child: Stack(
             children: <Widget>[
+              const Positioned.fill(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: <Color>[Color(0xFF1B2340), Color(0xFF0B0E18)],
+                    ),
+                  ),
+                ),
+              ),
               Positioned.fill(
                 child: CustomPaint(
                   painter: _GamePainter(state: this, repaint: _repaint),
@@ -856,9 +931,30 @@ class _GamePainter extends CustomPainter {
     rt.rotateY(t * 0.6);
     state._runner.localTransform = rt;
 
+    for (final _Particle p in state._particles) {
+      if (p.active) {
+        final double s = (p.life / p.maxLife).clamp(0.0, 1.0);
+        final vm.Matrix4 pm =
+            vm.Matrix4.translationValues(p.pos.x, p.pos.y, p.pos.z);
+        pm.scale(0.25 + 0.75 * s);
+        pm.rotateY(t * 6.0);
+        p.node.localTransform = pm;
+      } else {
+        p.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
+      }
+    }
+
+    double shx = 0;
+    double shy = 0;
+    if (state._shakeT > 0) {
+      final double amp = 0.4 * (state._shakeT / _GamePageState.shakeDuration);
+      shx = math.sin(t * 80.0) * amp;
+      shy = math.cos(t * 67.0) * amp;
+    }
+
     final double camX = state._runnerX * 0.35;
     final PerspectiveCamera camera = PerspectiveCamera(
-      position: vm.Vector3(camX, 2.6, 9.0),
+      position: vm.Vector3(camX + shx, 2.6 + shy, 9.0),
       target: vm.Vector3(state._runnerX * 0.5, -1.4, -15.0),
     );
 
@@ -889,6 +985,17 @@ class _Score {
   _Score(this.name, this.score);
   final String name;
   final int score;
+}
+
+class _Particle {
+  _Particle(this.node, this.material);
+  final Node node;
+  final UnlitMaterial material;
+  bool active = false;
+  final vm.Vector3 pos = vm.Vector3.zero();
+  final vm.Vector3 vel = vm.Vector3.zero();
+  double life = 0;
+  double maxLife = 1;
 }
 
 /// Convert a 0xAARRGGBB sRGB value to a linear-space RGBA for baseColorFactor.
