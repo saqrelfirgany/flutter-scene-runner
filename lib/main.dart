@@ -117,6 +117,8 @@ class _GamePageState extends State<GamePage>
   int _coinsCollected = 0;
   int _best = 0;
   double _shakeT = 0;
+  double _swipeDx = 0;
+  double _swipeDy = 0;
 
   // --- leaderboard (in-memory for now) ------------------------------------
   final List<_Score> _scores = <_Score>[];
@@ -455,23 +457,42 @@ class _GamePageState extends State<GamePage>
 
     // playing
     if (k == LogicalKeyboardKey.arrowLeft || k == LogicalKeyboardKey.keyA) {
-      _lane = math.max(-1, _lane - 1);
+      _moveLane(-1);
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.arrowRight || k == LogicalKeyboardKey.keyD) {
-      _lane = math.min(1, _lane + 1);
+      _moveLane(1);
       return KeyEventResult.handled;
     }
     if (k == LogicalKeyboardKey.space ||
         k == LogicalKeyboardKey.arrowUp ||
         k == LogicalKeyboardKey.keyW) {
-      if (_grounded) {
-        _grounded = false;
-        _jumpV = jumpImpulse;
-      }
+      _jump();
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
+  }
+
+  void _moveLane(int dir) {
+    if (_phase != Phase.playing) return;
+    _lane = dir > 0 ? math.min(1, _lane + 1) : math.max(-1, _lane - 1);
+  }
+
+  void _jump() {
+    if (_phase != Phase.playing) return;
+    if (_grounded) {
+      _grounded = false;
+      _jumpV = jumpImpulse;
+    }
+  }
+
+  void _handleSwipe() {
+    if (_phase != Phase.playing) return;
+    if (_swipeDx.abs() > _swipeDy.abs() && _swipeDx.abs() > 18) {
+      _moveLane(_swipeDx > 0 ? 1 : -1);
+    } else if (_swipeDy < -18) {
+      _jump();
+    }
   }
 
   void _buildWorld() {
@@ -557,8 +578,19 @@ class _GamePageState extends State<GamePage>
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTap: () {
-            if (!_enteringName) _focus.requestFocus();
+            if (_enteringName) return;
+            _focus.requestFocus();
+            if (_phase == Phase.menu) _startGame();
           },
+          onPanStart: (DragStartDetails d) {
+            _swipeDx = 0;
+            _swipeDy = 0;
+          },
+          onPanUpdate: (DragUpdateDetails d) {
+            _swipeDx += d.delta.dx;
+            _swipeDy += d.delta.dy;
+          },
+          onPanEnd: (DragEndDetails d) => _handleSwipe(),
           child: Stack(
             children: <Widget>[
               const Positioned.fill(
@@ -589,9 +621,10 @@ class _GamePageState extends State<GamePage>
               if (_phase == Phase.playing)
                 const Positioned(
                   left: 16,
+                  right: 16,
                   bottom: 14,
                   child: Text(
-                    'A / D  or  ← / →  : change lane        Space / ↑ : jump',
+                    'swipe or arrows to move  ·  swipe up / Space to jump',
                     style: TextStyle(color: Colors.white38, fontSize: 13),
                   ),
                 ),
@@ -669,7 +702,7 @@ class _GamePageState extends State<GamePage>
             _primaryButton('PLAY', _startGame),
             const SizedBox(height: 10),
             const Text(
-              'press  Space  to play',
+              'tap  or  Space  to play',
               style: TextStyle(color: Colors.white38, fontSize: 13),
             ),
           ],
@@ -680,7 +713,7 @@ class _GamePageState extends State<GamePage>
 
   Widget _leaderboard() {
     return Container(
-      width: 320,
+      width: math.min(320.0, MediaQuery.sizeOf(context).width - 32),
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
       decoration: BoxDecoration(
         color: const Color(0x14FFFFFF),
