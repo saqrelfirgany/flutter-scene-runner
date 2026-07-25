@@ -1,9 +1,11 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_scene/scene.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vector_math/vector_math.dart' as vm;
 
 Future<void> main() async {
@@ -11,6 +13,8 @@ Future<void> main() async {
   await Scene.initializeStaticResources();
   runApp(const RunnerApp());
 }
+
+enum Phase { menu, playing, crashed }
 
 class RunnerApp extends StatelessWidget {
   const RunnerApp({super.key});
@@ -36,48 +40,54 @@ class _GamePageState extends State<GamePage>
     with SingleTickerProviderStateMixin {
   // --- world tuning -------------------------------------------------------
   static const double roadWidth = 6.0;
-  static const double laneWidth = 2.0; // lane spacing; lanes at x = -2, 0, +2
+  static const double laneWidth = 2.0;
   static const double segLen = 4.0;
   static const int tileCount = 18;
-  static const double totalLen = tileCount * segLen; // 72
-  static const double zFar = -62.0; // far end; near end = 10
+  static const double totalLen = tileCount * segLen;
+  static const double zFar = -62.0;
   static const double roadTopY = -0.9;
-  static const double groundY = roadTopY + 0.5; // runner / obstacle rest height
+  static const double groundY = roadTopY + 0.5;
   static const double runnerZ = 1.5;
-  static const double runnerHalf = 0.5; // runner is a 1.0 cube
+  static const double runnerHalf = 0.5;
 
   // --- movement tuning ----------------------------------------------------
-  static const double baseSpeed = 15.0; // starting forward speed (units / s)
-  static const double maxSpeed = 32.0; // speed ramp ceiling
-  static const double speedRampPerSec = 0.45; // how fast difficulty rises
-  static const double laneLerp = 12.0; // lane snap responsiveness
-  static const double gravity = 38.0; // jump gravity (units / second^2)
-  static const double jumpImpulse = 12.0; // initial jump velocity (apex ~1.9)
+  static const double baseSpeed = 15.0;
+  static const double maxSpeed = 32.0;
+  static const double speedRampPerSec = 0.45;
+  static const double laneLerp = 12.0;
+  static const double gravity = 38.0;
+  static const double jumpImpulse = 12.0;
 
   // --- obstacles ----------------------------------------------------------
-  static const int obstacleCount = 10; // pool size
+  static const int obstacleCount = 10;
   static const double obHalfX = 0.6;
-  static const double obHalfY = 0.5; // 1.0 tall -> clearable near jump apex
+  static const double obHalfY = 0.5;
   static const double obHalfZ = 0.5;
   static const double obstacleCenterY = groundY;
-  static const double obSpacing = 17.0; // distance kept between obstacles
+  static const double obSpacing = 17.0;
   static const double firstSpawnDelay = 1.6;
 
   // --- coins --------------------------------------------------------------
-  static const int coinCount = 24; // pool size
-  static const double coinY = groundY + 0.35; // floats just above the road
+  static const int coinCount = 24;
+  static const double coinY = groundY + 0.35;
   static const int coinsPerLine = 4;
   static const double coinGap = 2.5;
   static const double coinInterval = 1.7;
   static const int coinScore = 25;
 
-  static const double spawnZ = -58.0; // where obstacles / coins appear
-  static const double despawnZ = 8.0; // recycled once past the runner
+  static const double spawnZ = -58.0;
+  static const double despawnZ = 8.0;
 
   static const int postCount = 9;
-  static const double postSpacing = totalLen / postCount; // 8
+  static const double postSpacing = totalLen / postCount;
   static const int dashCount = 18;
-  static const double dashSpacing = totalLen / dashCount; // 4
+  static const double dashSpacing = totalLen / dashCount;
+
+  // --- palette ------------------------------------------------------------
+  static const Color cTeal = Color(0xFF4FD1C5);
+  static const Color cGold = Color(0xFFFFC93C);
+  static const Color cRed = Color(0xFFE0533D);
+  static const Color cBg = Color(0xFF0E1220);
 
   final Scene _scene = Scene();
   final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
@@ -87,20 +97,26 @@ class _GamePageState extends State<GamePage>
   Duration _last = Duration.zero;
 
   // --- live game state ----------------------------------------------------
-  double _elapsed = 0; // seconds since (re)start -> drives the speed ramp
-  double _scrollZ = 0; // accumulated forward scroll
-  int _lane = 0; // -1, 0, 1
-  double _runnerX = 0; // smoothed lateral position
-  double _prevRunnerX = 0; // for lean
-  double _jumpY = 0; // height above ground
-  double _jumpV = 0; // vertical velocity
+  Phase _phase = Phase.menu;
+  double _elapsed = 0;
+  double _scrollZ = 0;
+  int _lane = 0;
+  double _runnerX = 0;
+  double _prevRunnerX = 0;
+  double _jumpY = 0;
+  double _jumpV = 0;
   bool _grounded = true;
-  bool _crashed = false;
   double _obSpawnTimer = firstSpawnDelay;
   double _coinSpawnTimer = 2.0;
   double _score = 0;
   int _coinsCollected = 0;
   int _best = 0;
+
+  // --- leaderboard (in-memory for now) ------------------------------------
+  final List<_Score> _scores = <_Score>[];
+  bool _enteringName = false;
+  final TextEditingController _nameCtrl = TextEditingController();
+  final FocusNode _nameFocus = FocusNode();
 
   double get _curSpeed =>
       math.min(maxSpeed, baseSpeed + _elapsed * speedRampPerSec);
@@ -115,13 +131,14 @@ class _GamePageState extends State<GamePage>
   final List<_Coin> _coins = <_Coin>[];
   late final Node _runner;
 
-  static double _laneX(int lane) => -lane * laneWidth; // matches runner mapping
+  static double _laneX(int lane) => -lane * laneWidth;
 
   @override
   void initState() {
     super.initState();
     _buildWorld();
     _ticker = createTicker(_onTick)..start();
+    _loadScores();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focus.requestFocus();
     });
@@ -132,24 +149,31 @@ class _GamePageState extends State<GamePage>
         ? 0
         : (elapsed - _last).inMicroseconds / Duration.microsecondsPerSecond;
     _last = elapsed;
-    if (dt > 0.05) dt = 0.05; // clamp big hitches (e.g. after a stall)
+    if (dt > 0.05) dt = 0.05;
     _update(dt);
     _repaint.value++;
   }
 
   void _update(double dt) {
-    if (_crashed) return; // world is frozen after a crash
+    if (_phase == Phase.crashed) return;
+
+    if (_phase == Phase.menu) {
+      // Attract mode: the road drifts, the runner idles. No spawns / scoring.
+      _scrollZ += baseSpeed * dt;
+      _elapsed += dt;
+      return;
+    }
+
+    // --- playing ---
     final double v = _curSpeed;
     _elapsed += dt;
     _scrollZ += v * dt;
-    _score += v * dt * 0.7; // distance-based score
+    _score += v * dt * 0.7;
 
-    // Lane movement: frame-rate-independent smoothing toward the target lane.
     _prevRunnerX = _runnerX;
     final double targetX = _laneX(_lane);
     _runnerX += (targetX - _runnerX) * (1 - math.exp(-laneLerp * dt));
 
-    // Jump physics.
     if (!_grounded) {
       _jumpY += _jumpV * dt;
       _jumpV -= gravity * dt;
@@ -160,21 +184,18 @@ class _GamePageState extends State<GamePage>
       }
     }
 
-    // Spawn obstacles keeping a roughly constant distance (harder as v rises).
     _obSpawnTimer -= dt;
     if (_obSpawnTimer <= 0) {
       _spawnObstacle();
       _obSpawnTimer = obSpacing / v;
     }
 
-    // Spawn coin lines on a timer.
     _coinSpawnTimer -= dt;
     if (_coinSpawnTimer <= 0) {
       _spawnCoinLine();
       _coinSpawnTimer = coinInterval;
     }
 
-    // Move obstacles; recycle; detect collision.
     for (final _Obstacle o in _obstacles) {
       if (!o.active) continue;
       o.z += v * dt;
@@ -188,7 +209,6 @@ class _GamePageState extends State<GamePage>
       }
     }
 
-    // Move coins; recycle; collect on overlap.
     for (final _Coin c in _coins) {
       if (!c.active) continue;
       c.z += v * dt;
@@ -208,7 +228,7 @@ class _GamePageState extends State<GamePage>
     for (final _Obstacle o in _obstacles) {
       if (!o.active) {
         o.active = true;
-        o.lane = _rng.nextInt(3) - 1; // -1, 0, 1
+        o.lane = _rng.nextInt(3) - 1;
         o.z = spawnZ;
         return;
       }
@@ -244,51 +264,141 @@ class _GamePageState extends State<GamePage>
     final double dx = (_runnerX - _laneX(c.lane)).abs();
     final double dy = (runnerY - coinY).abs();
     final double dz = (runnerZ - c.z).abs();
-    return dx < 1.0 && dy < 1.8 && dz < 0.9; // generous -> feels good
+    return dx < 1.0 && dy < 1.8 && dz < 0.9;
   }
+
+  bool _isHighScore(int s) =>
+      s > 0 && (_scores.length < 5 || s > _scores.last.score);
 
   void _crash() {
-    if (_crashed) return;
-    _best = math.max(_best, _score.round());
-    setState(() => _crashed = true);
+    if (_phase != Phase.playing) return;
+    final int s = _score.round();
+    _best = math.max(_best, s);
+    final bool high = _isHighScore(s);
+    setState(() {
+      _phase = Phase.crashed;
+      _enteringName = high;
+      _nameCtrl.text = '';
+    });
+    if (high) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _nameFocus.requestFocus();
+      });
+    }
   }
 
-  void _restart() {
+  void _submitName() {
+    final String raw = _nameCtrl.text.trim().replaceAll('|', ' ');
+    final String name =
+        raw.isEmpty ? 'YOU' : (raw.length > 12 ? raw.substring(0, 12) : raw);
+    _scores.add(_Score(name, _score.round()));
+    _scores.sort((a, b) => b.score.compareTo(a.score));
+    if (_scores.length > 5) _scores.removeRange(5, _scores.length);
+    _saveScores();
+    setState(() => _enteringName = false);
+    _focus.requestFocus();
+  }
+
+  Future<void> _loadScores() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final List<String> raw =
+          prefs.getStringList('leaderboard.v1') ?? <String>[];
+      final List<_Score> loaded = <_Score>[];
+      for (final String e in raw) {
+        final int idx = e.indexOf('|');
+        if (idx <= 0) continue;
+        final int? sc = int.tryParse(e.substring(0, idx));
+        if (sc == null) continue;
+        loaded.add(_Score(e.substring(idx + 1), sc));
+      }
+      loaded.sort((a, b) => b.score.compareTo(a.score));
+      if (!mounted) return;
+      setState(() {
+        _scores
+          ..clear()
+          ..addAll(loaded.take(5));
+      });
+    } catch (_) {
+      // ignore load errors — start with an empty board
+    }
+  }
+
+  Future<void> _saveScores() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        'leaderboard.v1',
+        _scores.map((_Score s) => '${s.score}|${s.name}').toList(),
+      );
+    } catch (_) {}
+  }
+
+  void _resetRun() {
+    _elapsed = 0;
+    _scrollZ = 0;
+    _lane = 0;
+    _runnerX = 0;
+    _prevRunnerX = 0;
+    _jumpY = 0;
+    _jumpV = 0;
+    _grounded = true;
+    _obSpawnTimer = firstSpawnDelay;
+    _coinSpawnTimer = 2.0;
+    _score = 0;
+    _coinsCollected = 0;
+    for (final _Obstacle o in _obstacles) {
+      o.active = false;
+    }
+    for (final _Coin c in _coins) {
+      c.active = false;
+    }
+  }
+
+  void _startGame() {
+    _resetRun();
     setState(() {
-      _crashed = false;
-      _elapsed = 0;
-      _scrollZ = 0;
-      _lane = 0;
-      _runnerX = 0;
-      _prevRunnerX = 0;
-      _jumpY = 0;
-      _jumpV = 0;
-      _grounded = true;
-      _obSpawnTimer = firstSpawnDelay;
-      _coinSpawnTimer = 2.0;
-      _score = 0;
-      _coinsCollected = 0;
-      for (final _Obstacle o in _obstacles) {
-        o.active = false;
-      }
-      for (final _Coin c in _coins) {
-        c.active = false;
-      }
+      _phase = Phase.playing;
+      _enteringName = false;
     });
+    _focus.requestFocus();
+  }
+
+  void _goMenu() {
+    _resetRun();
+    setState(() {
+      _phase = Phase.menu;
+      _enteringName = false;
+    });
+    _focus.requestFocus();
   }
 
   KeyEventResult _onKey(KeyEvent e) {
     if (e is! KeyDownEvent) return KeyEventResult.ignored;
     final LogicalKeyboardKey k = e.logicalKey;
 
-    if (_crashed) {
+    if (_phase == Phase.menu) {
       if (k == LogicalKeyboardKey.space || k == LogicalKeyboardKey.enter) {
-        _restart();
+        _startGame();
         return KeyEventResult.handled;
       }
       return KeyEventResult.ignored;
     }
 
+    if (_phase == Phase.crashed) {
+      if (_enteringName) return KeyEventResult.ignored; // TextField owns keys
+      if (k == LogicalKeyboardKey.space || k == LogicalKeyboardKey.enter) {
+        _startGame();
+        return KeyEventResult.handled;
+      }
+      if (k == LogicalKeyboardKey.keyM || k == LogicalKeyboardKey.escape) {
+        _goMenu();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
+
+    // playing
     if (k == LogicalKeyboardKey.arrowLeft || k == LogicalKeyboardKey.keyA) {
       _lane = math.max(-1, _lane - 1);
       return KeyEventResult.handled;
@@ -318,7 +428,6 @@ class _GamePageState extends State<GamePage>
       _tiles.add(node);
       _scene.add(node);
     }
-
     const int dashColor = 0xFFE7C24B;
     for (int k = 0; k < dashCount; k++) {
       final Node l = _box(vm.Vector3(0.14, 0.06, 1.4), colorHex: dashColor);
@@ -328,7 +437,6 @@ class _GamePageState extends State<GamePage>
       _scene.add(l);
       _scene.add(r);
     }
-
     const int postColor = 0xFF4FD1C5;
     for (int j = 0; j < postCount; j++) {
       final Node l = _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor);
@@ -338,7 +446,6 @@ class _GamePageState extends State<GamePage>
       _scene.add(l);
       _scene.add(r);
     }
-
     const int obstacleColor = 0xFFE0533D;
     for (int i = 0; i < obstacleCount; i++) {
       final Node n = _box(vm.Vector3(obHalfX * 2, obHalfY * 2, obHalfZ * 2),
@@ -346,14 +453,12 @@ class _GamePageState extends State<GamePage>
       _obstacles.add(_Obstacle(n));
       _scene.add(n);
     }
-
     const int coinColor = 0xFFFFC93C;
     for (int i = 0; i < coinCount; i++) {
       final Node n = _box(vm.Vector3(0.5, 0.5, 0.12), colorHex: coinColor);
       _coins.add(_Coin(n));
       _scene.add(n);
     }
-
     _runner = _box(vm.Vector3(1.0, 1.0, 1.0), debug: true);
     _scene.add(_runner);
   }
@@ -370,20 +475,26 @@ class _GamePageState extends State<GamePage>
     _ticker.dispose();
     _repaint.dispose();
     _focus.dispose();
+    _nameFocus.dispose();
+    _nameCtrl.dispose();
     super.dispose();
   }
+
+  // --- UI -----------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0E1220),
+      backgroundColor: cBg,
       body: Focus(
         focusNode: _focus,
         autofocus: true,
         onKeyEvent: (FocusNode node, KeyEvent e) => _onKey(e),
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onTap: () => _focus.requestFocus(),
+          onTap: () {
+            if (!_enteringName) _focus.requestFocus();
+          },
           child: Stack(
             children: <Widget>[
               Positioned.fill(
@@ -391,97 +502,287 @@ class _GamePageState extends State<GamePage>
                   painter: _GamePainter(state: this, repaint: _repaint),
                 ),
               ),
-              // Score / coins / speed HUD (rebuilds every frame via _repaint).
-              Positioned(
-                top: 12,
-                left: 0,
-                right: 0,
-                child: IgnorePointer(
-                  child: ValueListenableBuilder<int>(
-                    valueListenable: _repaint,
-                    builder: (BuildContext context, int _, Widget? _) {
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.center,
-                        children: <Widget>[
-                          Text(
-                            '${_score.round()}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 42,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 1,
-                            ),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            '●  $_coinsCollected      ${(_curSpeed * 5).round()} km/h',
-                            style: const TextStyle(
-                              color: Color(0xFFFFC93C),
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ),
-              ),
               const Positioned(
                 left: 16,
                 top: 14,
                 child: Text(
-                  'flutter-scene-runner · Day 2',
+                  'flutter-scene-runner',
                   style: TextStyle(color: Colors.white38, fontSize: 13),
                 ),
               ),
-              const Positioned(
-                left: 16,
-                bottom: 14,
-                child: Text(
-                  'A / D  or  ← / →  : change lane        Space / ↑ : jump',
-                  style: TextStyle(color: Colors.white38, fontSize: 13),
-                ),
-              ),
-              if (_crashed)
-                Positioned.fill(
-                  child: Container(
-                    color: Colors.black54,
-                    alignment: Alignment.center,
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        const Text(
-                          'CRASHED',
-                          style: TextStyle(
-                            color: Color(0xFFE0533D),
-                            fontSize: 52,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: 2,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Text(
-                          'Score  ${_score.round()}      Best  $_best',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 20,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Press  Space  to restart',
-                          style: TextStyle(color: Colors.white70, fontSize: 18),
-                        ),
-                      ],
-                    ),
+              if (_phase == Phase.playing) _hud(),
+              if (_phase == Phase.playing)
+                const Positioned(
+                  left: 16,
+                  bottom: 14,
+                  child: Text(
+                    'A / D  or  ← / →  : change lane        Space / ↑ : jump',
+                    style: TextStyle(color: Colors.white38, fontSize: 13),
                   ),
                 ),
+              if (_phase == Phase.menu) _menuOverlay(),
+              if (_phase == Phase.crashed) _crashedOverlay(),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _hud() {
+    return Positioned(
+      top: 12,
+      left: 0,
+      right: 0,
+      child: IgnorePointer(
+        child: ValueListenableBuilder<int>(
+          valueListenable: _repaint,
+          builder: (BuildContext context, int _, Widget? __) {
+            return Column(
+              children: <Widget>[
+                Text(
+                  '${_score.round()}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 42,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 1,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '●  $_coinsCollected      ${(_curSpeed * 5).round()} km/h',
+                  style: const TextStyle(
+                    color: cGold,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _menuOverlay() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black54,
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Text(
+              'flutter-scene-runner',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 34,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1,
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              '3D endless runner · built on Flutter GPU',
+              style: TextStyle(color: Colors.white54, fontSize: 14),
+            ),
+            const SizedBox(height: 26),
+            _leaderboard(),
+            const SizedBox(height: 22),
+            _primaryButton('PLAY', _startGame),
+            const SizedBox(height: 10),
+            const Text(
+              'press  Space  to play',
+              style: TextStyle(color: Colors.white38, fontSize: 13),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _leaderboard() {
+    return Container(
+      width: 320,
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0x14FFFFFF),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0x26FFFFFF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          const Text(
+            'BEST SCORES',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: cTeal,
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 2,
+            ),
+          ),
+          const SizedBox(height: 12),
+          if (_scores.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 6),
+              child: Text(
+                'no scores yet — be the first!',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white38, fontSize: 14),
+              ),
+            )
+          else
+            ...List<Widget>.generate(_scores.length, (int i) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  children: <Widget>[
+                    SizedBox(
+                      width: 22,
+                      child: Text(
+                        '${i + 1}',
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 15),
+                      ),
+                    ),
+                    Expanded(
+                      child: Text(
+                        _scores[i].name,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: Colors.white, fontSize: 15),
+                      ),
+                    ),
+                    Text(
+                      '${_scores[i].score}',
+                      style: const TextStyle(
+                        color: cGold,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
+  Widget _crashedOverlay() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black54,
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const Text(
+              'CRASHED',
+              style: TextStyle(
+                color: cRed,
+                fontSize: 52,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 2,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Score  ${_score.round()}      Best  $_best',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 20,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 20),
+            if (_enteringName) ..._nameEntry() else ..._crashButtons(),
+          ],
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _nameEntry() {
+    return <Widget>[
+      const Text(
+        'new best score — enter your name',
+        style: TextStyle(color: cGold, fontSize: 15),
+      ),
+      const SizedBox(height: 10),
+      SizedBox(
+        width: 260,
+        child: TextField(
+          controller: _nameCtrl,
+          focusNode: _nameFocus,
+          autofocus: true,
+          textAlign: TextAlign.center,
+          maxLength: 12,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => _submitName(),
+          style: const TextStyle(color: Colors.white, fontSize: 18),
+          decoration: const InputDecoration(
+            counterText: '',
+            hintText: 'YOU',
+            hintStyle: TextStyle(color: Colors.white24),
+            filled: true,
+            fillColor: Color(0x14FFFFFF),
+            border: OutlineInputBorder(borderSide: BorderSide.none),
+          ),
+        ),
+      ),
+      const SizedBox(height: 12),
+      _primaryButton('SAVE', _submitName),
+    ];
+  }
+
+  List<Widget> _crashButtons() {
+    return <Widget>[
+      Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          _primaryButton('PLAY AGAIN', _startGame),
+          const SizedBox(width: 12),
+          OutlinedButton(
+            onPressed: _goMenu,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.white,
+              side: const BorderSide(color: Color(0x40FFFFFF)),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10)),
+            ),
+            child: const Text('MENU'),
+          ),
+        ],
+      ),
+      const SizedBox(height: 10),
+      const Text(
+        'Space  play again    ·    M  menu',
+        style: TextStyle(color: Colors.white38, fontSize: 13),
+      ),
+    ];
+  }
+
+  Widget _primaryButton(String label, VoidCallback onTap) {
+    return ElevatedButton(
+      onPressed: onTap,
+      style: ElevatedButton.styleFrom(
+        backgroundColor: cTeal,
+        foregroundColor: cBg,
+        padding: const EdgeInsets.symmetric(horizontal: 34, vertical: 14),
+        textStyle: const TextStyle(
+            fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: 1),
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+      child: Text(label),
     );
   }
 }
@@ -536,7 +837,7 @@ class _GamePainter extends CustomPainter {
       if (c.active) {
         final vm.Matrix4 m = vm.Matrix4.translationValues(
             _GamePageState._laneX(c.lane), _GamePageState.coinY, c.z);
-        m.rotateY(t * 4.0); // spin
+        m.rotateY(t * 4.0);
         c.node.localTransform = m;
       } else {
         c.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
@@ -570,7 +871,6 @@ class _GamePainter extends CustomPainter {
 
 class _Obstacle {
   _Obstacle(this.node);
-
   final Node node;
   bool active = false;
   int lane = 0;
@@ -579,11 +879,16 @@ class _Obstacle {
 
 class _Coin {
   _Coin(this.node);
-
   final Node node;
   bool active = false;
   int lane = 0;
   double z = 0;
+}
+
+class _Score {
+  _Score(this.name, this.score);
+  final String name;
+  final int score;
 }
 
 /// Convert a 0xAARRGGBB sRGB value to a linear-space RGBA for baseColorFactor.
