@@ -79,6 +79,8 @@ class _GamePageState extends State<GamePage>
   static const double obstacleCenterY = groundY;
   static const double obSpacing = 17.0;
   static const double firstSpawnDelay = 1.6;
+  static const double wallChance = 0.35; // share of spawns that are 2-lane walls
+  static const double wallAfter = 8.0; // seconds before walls start appearing
 
   // --- coins --------------------------------------------------------------
   static const int coinCount = 24;
@@ -110,7 +112,7 @@ class _GamePageState extends State<GamePage>
   // --- look: post-FX + neon glow (Improvement 4) --------------------------
   // Unlit colors sit in [0,1] linear, below bloom's HDR threshold, so accent
   // nodes are multiplied above 1.0 (see _box `glow`) to make them bloom.
-  static const double coinGlow = 2.2;
+  static const double coinGlow = 1.6;
   static const double postGlow = 2.2;
   static const double obstacleGlow = 1.6;
   static const double particleGlow = 2.0;
@@ -336,10 +338,23 @@ class _GamePageState extends State<GamePage>
   }
 
   void _spawnObstacle() {
+    // After the opening seconds, some spawns are two-lane walls with a single
+    // open lane, forcing a deliberate lane change. One lane is always left free.
+    if (_elapsed > wallAfter && _rng.nextDouble() < wallChance) {
+      final int openLane = _rng.nextInt(3) - 1;
+      for (int lane = -1; lane <= 1; lane++) {
+        if (lane != openLane) _placeObstacle(lane);
+      }
+    } else {
+      _placeObstacle(_rng.nextInt(3) - 1);
+    }
+  }
+
+  void _placeObstacle(int lane) {
     for (final _Obstacle o in _obstacles) {
       if (!o.active) {
         o.active = true;
-        o.lane = _rng.nextInt(3) - 1;
+        o.lane = lane;
         o.z = spawnZ;
         return;
       }
