@@ -16,6 +16,8 @@ Future<void> main() async {
 
 enum Phase { menu, playing, crashed }
 
+enum PowerKind { magnet, shield, doubleScore }
+
 class RunnerApp extends StatelessWidget {
   const RunnerApp({super.key});
 
@@ -120,6 +122,21 @@ class _GamePageState extends State<GamePage>
   static const double fogStart = 34.0; // world units from the camera
   static const double fogEnd = 62.0;
 
+  // --- power-ups (Improvement 6) ------------------------------------------
+  static const int powerupCount = 3; // pooled orbs (rarely >1 on screen)
+  static const double powerRadius = 0.42;
+  static const double powerY = groundY + 0.5;
+  static const double powerFirstDelay = 7.0;
+  static const double powerInterval = 13.0;
+  static const double powerGlow = 2.4;
+  static const double magnetDuration = 6.0;
+  static const double doubleDuration = 8.0;
+  static const double magnetRange = 12.0; // z-reach of the magnet
+  static const double magnetPull = 9.0; // how fast coins slide to the runner
+  static const int cMagnet = 0xFFB56BFF; // violet
+  static const int cShield = 0xFF49B6FF; // azure
+  static const int cDouble = 0xFFFF5CA8; // magenta
+
   final Scene _scene = Scene();
   final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
   final FocusNode _focus = FocusNode();
@@ -163,6 +180,7 @@ class _GamePageState extends State<GamePage>
   final List<Node> _dashesR = <Node>[];
   final List<_Obstacle> _obstacles = <_Obstacle>[];
   final List<_Coin> _coins = <_Coin>[];
+  final List<_PowerUp> _powerups = <_PowerUp>[];
   final List<_Particle> _particles = <_Particle>[];
   late final Node _runner; // debug-cube placeholder, shown until Dash loads
   Node? _dash; // the Flutter Dash model; null until fromGlbAsset resolves
@@ -175,6 +193,12 @@ class _GamePageState extends State<GamePage>
   double _wRun = 0;
   double _wIdle = 1;
   double _wJump = 0;
+
+  // power-up run state
+  double _powerSpawnTimer = powerFirstDelay;
+  double _magnetT = 0; // seconds of magnet remaining
+  double _doubleT = 0; // seconds of ×2 remaining
+  bool _shield = false; // one-hit shield charge
 
   static double _laneX(int lane) => -lane * laneWidth;
 
@@ -218,7 +242,10 @@ class _GamePageState extends State<GamePage>
     final double v = _curSpeed;
     _elapsed += dt;
     _scrollZ += v * dt;
-    _score += v * dt * 0.7;
+    _score += v * dt * 0.7 * (_doubleT > 0 ? 2.0 : 1.0);
+
+    if (_magnetT > 0) _magnetT = math.max(0, _magnetT - dt);
+    if (_doubleT > 0) _doubleT = math.max(0, _doubleT - dt);
 
     _prevRunnerX = _runnerX;
     final double targetX = _laneX(_lane);
@@ -246,6 +273,12 @@ class _GamePageState extends State<GamePage>
       _coinSpawnTimer = coinInterval;
     }
 
+    _powerSpawnTimer -= dt;
+    if (_powerSpawnTimer <= 0) {
+      _spawnPowerUp();
+      _powerSpawnTimer = powerInterval;
+    }
+
     for (final _Obstacle o in _obstacles) {
       if (!o.active) continue;
       o.z += v * dt;
@@ -254,8 +287,15 @@ class _GamePageState extends State<GamePage>
         continue;
       }
       if (_hitsObstacle(o)) {
-        _crash();
-        return;
+        if (_shield) {
+          _shield = false; // absorb one hit and destroy the obstacle
+          o.active = false;
+          _spawnParticles(
+              _laneX(o.lane), obstacleCenterY, o.z, 16, cShield, 5.0, 4.0);
+        } else {
+          _crash();
+          return;
+        }
       }
     }
 
@@ -266,11 +306,31 @@ class _GamePageState extends State<GamePage>
         c.active = false;
         continue;
       }
+      // Magnet: slide the coin's x toward the runner once it's within reach.
+      final double targetX = (_magnetT > 0 && (c.z - runnerZ).abs() < magnetRange)
+          ? _runnerX
+          : _laneX(c.lane);
+      c.cx += (targetX - c.cx) * (1 - math.exp(-magnetPull * dt));
       if (_collectsCoin(c)) {
         c.active = false;
         _coinsCollected++;
-        _score += coinScore;
-        _spawnParticles(_laneX(c.lane), coinY, c.z, 7, 0xFFFFC93C, 3.5, 3.0);
+        _score += coinScore * (_doubleT > 0 ? 2 : 1);
+        _spawnParticles(c.cx, coinY, c.z, 7, 0xFFFFC93C, 3.5, 3.0);
+      }
+    }
+
+    for (final _PowerUp p in _powerups) {
+      if (!p.active) continue;
+      p.z += v * dt;
+      if (p.z > despawnZ) {
+        p.active = false;
+        continue;
+      }
+      if (_collectsPower(p)) {
+        p.active = false;
+        _activatePower(p.kind);
+        _spawnParticles(
+            _laneX(p.lane), powerY, p.z, 18, _powerColor(p.kind), 5.5, 4.5);
       }
     }
   }
@@ -294,6 +354,7 @@ class _GamePageState extends State<GamePage>
       if (!c.active) {
         c.active = true;
         c.lane = lane;
+        c.cx = _laneX(lane);
         c.z = spawnZ - placed * coinGap;
         placed++;
       }
@@ -312,10 +373,56 @@ class _GamePageState extends State<GamePage>
 
   bool _collectsCoin(_Coin c) {
     final double runnerY = groundY + _jumpY;
-    final double dx = (_runnerX - _laneX(c.lane)).abs();
+    final double dx = (_runnerX - c.cx).abs();
     final double dy = (runnerY - coinY).abs();
     final double dz = (runnerZ - c.z).abs();
     return dx < 1.0 && dy < 1.8 && dz < 0.9;
+  }
+
+  void _spawnPowerUp() {
+    for (final _PowerUp p in _powerups) {
+      if (!p.active) {
+        p.active = true;
+        p.kind = PowerKind.values[_rng.nextInt(PowerKind.values.length)];
+        p.lane = _rng.nextInt(3) - 1;
+        p.z = spawnZ;
+        p.material.baseColorFactor = _glowFromHex(_powerColor(p.kind), powerGlow);
+        return;
+      }
+    }
+  }
+
+  bool _collectsPower(_PowerUp p) {
+    final double runnerY = groundY + _jumpY;
+    final double dx = (_runnerX - _laneX(p.lane)).abs();
+    final double dy = (runnerY - powerY).abs();
+    final double dz = (runnerZ - p.z).abs();
+    return dx < 1.1 && dy < 1.8 && dz < 1.0;
+  }
+
+  void _activatePower(PowerKind k) {
+    switch (k) {
+      case PowerKind.magnet:
+        _magnetT = magnetDuration;
+        break;
+      case PowerKind.shield:
+        _shield = true;
+        break;
+      case PowerKind.doubleScore:
+        _doubleT = doubleDuration;
+        break;
+    }
+  }
+
+  static int _powerColor(PowerKind k) {
+    switch (k) {
+      case PowerKind.magnet:
+        return cMagnet;
+      case PowerKind.shield:
+        return cShield;
+      case PowerKind.doubleScore:
+        return cDouble;
+    }
   }
 
   void _spawnParticles(double x, double y, double z, int count, int colorHex,
@@ -445,9 +552,16 @@ class _GamePageState extends State<GamePage>
     for (final _Coin c in _coins) {
       c.active = false;
     }
+    for (final _PowerUp p in _powerups) {
+      p.active = false;
+    }
     for (final _Particle p in _particles) {
       p.active = false;
     }
+    _powerSpawnTimer = powerFirstDelay;
+    _magnetT = 0;
+    _doubleT = 0;
+    _shield = false;
     _shakeT = 0;
   }
 
@@ -576,6 +690,15 @@ class _GamePageState extends State<GamePage>
       final Node n =
           _box(vm.Vector3(0.5, 0.5, 0.12), colorHex: coinColor, glow: coinGlow);
       _coins.add(_Coin(n));
+      _scene.add(n);
+    }
+    for (int i = 0; i < powerupCount; i++) {
+      final UnlitMaterial mat = UnlitMaterial()
+        ..baseColorFactor = _glowFromHex(cMagnet, powerGlow);
+      final Node n = Node(
+          mesh: Mesh(
+              IcosphereGeometry(radius: powerRadius, subdivisions: 2), mat));
+      _powerups.add(_PowerUp(n, mat));
       _scene.add(n);
     }
     for (int i = 0; i < particleCount; i++) {
@@ -811,10 +934,44 @@ class _GamePageState extends State<GamePage>
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                _powerChips(),
               ],
             );
           },
         ),
+      ),
+    );
+  }
+
+  Widget _powerChips() {
+    final List<Widget> chips = <Widget>[];
+    if (_magnetT > 0) {
+      chips.add(_powerChip('MAGNET  ${_magnetT.ceil()}', const Color(cMagnet)));
+    }
+    if (_doubleT > 0) {
+      chips.add(_powerChip('×2  ${_doubleT.ceil()}', const Color(cDouble)));
+    }
+    if (_shield) chips.add(_powerChip('SHIELD', const Color(cShield)));
+    if (chips.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(mainAxisSize: MainAxisSize.min, children: chips),
+    );
+  }
+
+  Widget _powerChip(String label, Color color) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: color.withValues(alpha: 0.85)),
+      ),
+      child: Text(
+        label,
+        style:
+            TextStyle(color: color, fontSize: 13, fontWeight: FontWeight.w700),
       ),
     );
   }
@@ -1088,12 +1245,23 @@ class _GamePainter extends CustomPainter {
 
     for (final _Coin c in state._coins) {
       if (c.active) {
-        final vm.Matrix4 m = vm.Matrix4.translationValues(
-            _GamePageState._laneX(c.lane), _GamePageState.coinY, c.z);
+        final vm.Matrix4 m =
+            vm.Matrix4.translationValues(c.cx, _GamePageState.coinY, c.z);
         m.rotateY(t * 4.0);
         c.node.localTransform = m;
       } else {
         c.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
+      }
+    }
+
+    for (final _PowerUp p in state._powerups) {
+      if (p.active) {
+        final vm.Matrix4 m = vm.Matrix4.translationValues(
+            _GamePageState._laneX(p.lane), _GamePageState.powerY, p.z);
+        m.rotateY(t * 2.5);
+        p.node.localTransform = m;
+      } else {
+        p.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
       }
     }
 
@@ -1176,6 +1344,17 @@ class _Coin {
   _Coin(this.node);
   final Node node;
   bool active = false;
+  int lane = 0;
+  double z = 0;
+  double cx = 0; // continuous x; eased toward the runner while a magnet is up
+}
+
+class _PowerUp {
+  _PowerUp(this.node, this.material);
+  final Node node;
+  final UnlitMaterial material; // recolored per kind on spawn
+  bool active = false;
+  PowerKind kind = PowerKind.magnet;
   int lane = 0;
   double z = 0;
 }
