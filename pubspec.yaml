@@ -37,6 +37,7 @@ dependencies:
   flutter_scene: ^0.19.0
   vector_math: ^2.4.1
   shared_preferences: ^2.5.5
+  audioplayers: ^6.8.1
 
 dev_dependencies:
   flutter_test:
@@ -65,6 +66,7 @@ flutter:
   # here, so only this model is bundled into the app.
   assets:
     - assets/models/dash.glb
+    - assets/sfx/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter_scene/scene.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:vector_math/vector_math.dart' as vm;
@@ -202,6 +203,11 @@ class _GamePageState extends State<GamePage>
   double _doubleT = 0; // seconds of ×2 remaining
   bool _shield = false; // one-hit shield charge
 
+  // audio: one player per SFX, plus a 3-step volume the user cycles + persists.
+  final _Audio _audio = _Audio();
+  static const List<double> volumes = <double>[0.0, 0.45, 0.9];
+  int _volLevel = 2; // index into volumes; 0 = muted
+
   static double _laneX(int lane) => -lane * laneWidth;
 
   @override
@@ -212,6 +218,8 @@ class _GamePageState extends State<GamePage>
     _loadDash();
     _ticker = createTicker(_onTick)..start();
     _loadScores();
+    _audio.init();
+    _loadVolume();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focus.requestFocus();
     });
@@ -294,6 +302,7 @@ class _GamePageState extends State<GamePage>
           o.active = false;
           _spawnParticles(
               _laneX(o.lane), obstacleCenterY, o.z, 16, cShield, 5.0, 4.0);
+          _audio.power();
         } else {
           _crash();
           return;
@@ -318,6 +327,7 @@ class _GamePageState extends State<GamePage>
         _coinsCollected++;
         _score += coinScore * (_doubleT > 0 ? 2 : 1);
         _spawnParticles(c.cx, coinY, c.z, 7, 0xFFFFC93C, 3.5, 3.0);
+        _audio.coin();
       }
     }
 
@@ -333,6 +343,7 @@ class _GamePageState extends State<GamePage>
         _activatePower(p.kind);
         _spawnParticles(
             _laneX(p.lane), powerY, p.z, 18, _powerColor(p.kind), 5.5, 4.5);
+        _audio.power();
       }
     }
   }
@@ -488,6 +499,7 @@ class _GamePageState extends State<GamePage>
     _best = math.max(_best, s);
     _shakeT = shakeDuration;
     _spawnParticles(_runnerX, groundY + _jumpY, runnerZ, 22, 0xFFE0533D, 5.0, 5.0);
+    _audio.crash();
     final bool high = _isHighScore(s);
     setState(() {
       _phase = Phase.crashed;
@@ -652,6 +664,7 @@ class _GamePageState extends State<GamePage>
       _grounded = false;
       _jumpV = jumpImpulse;
       _clipJump?.replay(); // restart the jump one-shot from frame 0
+      _audio.jump();
     }
   }
 
@@ -845,7 +858,34 @@ class _GamePageState extends State<GamePage>
     _focus.dispose();
     _nameFocus.dispose();
     _nameCtrl.dispose();
+    _audio.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadVolume() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final int lvl = prefs.getInt('volume.v1') ?? 2;
+      if (!mounted) return;
+      setState(() => _volLevel = lvl.clamp(0, volumes.length - 1));
+      _applyVolume();
+    } catch (_) {}
+  }
+
+  void _applyVolume() => _audio.volume = volumes[_volLevel];
+
+  void _cycleVolume() {
+    setState(() => _volLevel = (_volLevel + 1) % volumes.length);
+    _applyVolume();
+    _focus.requestFocus();
+    _saveVolume();
+  }
+
+  Future<void> _saveVolume() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('volume.v1', _volLevel);
+    } catch (_) {}
   }
 
   // --- UI -----------------------------------------------------------------
@@ -898,6 +938,23 @@ class _GamePageState extends State<GamePage>
                 child: Text(
                   'flutter-scene-runner',
                   style: TextStyle(color: Colors.white38, fontSize: 13),
+                ),
+              ),
+              Positioned(
+                right: 6,
+                top: 6,
+                child: IconButton(
+                  onPressed: _cycleVolume,
+                  tooltip: 'volume',
+                  icon: Icon(
+                    _volLevel == 0
+                        ? Icons.volume_off_rounded
+                        : _volLevel == 1
+                            ? Icons.volume_down_rounded
+                            : Icons.volume_up_rounded,
+                    color: _volLevel == 0 ? Colors.white38 : cTeal,
+                    size: 22,
+                  ),
                 ),
               ),
               if (_phase == Phase.playing) _hud(),
@@ -1407,4 +1464,39 @@ vm.Vector4 _glowFromHex(int hex, double glow) {
   final vm.Vector4 c = _linearFromHex(hex);
   if (glow == 1.0) return c;
   return vm.Vector4(c.r * glow, c.g * glow, c.b * glow, c.a);
+}
+
+/// Tiny SFX wrapper: one reusable player per sound, played from bundled WAVs.
+/// [volume] `0` mutes (playback is skipped); failures are swallowed so audio
+/// can never interrupt the game loop.
+class _Audio {
+  final AudioPlayer _coin = AudioPlayer(playerId: 'sfx_coin');
+  final AudioPlayer _jump = AudioPlayer(playerId: 'sfx_jump');
+  final AudioPlayer _crash = AudioPlayer(playerId: 'sfx_crash');
+  final AudioPlayer _power = AudioPlayer(playerId: 'sfx_power');
+  double volume = 0.9;
+
+  Future<void> init() async {
+    for (final AudioPlayer p in <AudioPlayer>[_coin, _jump, _crash, _power]) {
+      try {
+        await p.setReleaseMode(ReleaseMode.stop);
+      } catch (_) {}
+    }
+  }
+
+  void _play(AudioPlayer p, String asset) {
+    if (volume <= 0) return;
+    p.play(AssetSource(asset), volume: volume).catchError((Object _) {});
+  }
+
+  void coin() => _play(_coin, 'sfx/coin.wav');
+  void jump() => _play(_jump, 'sfx/jump.wav');
+  void crash() => _play(_crash, 'sfx/crash.wav');
+  void power() => _play(_power, 'sfx/power.wav');
+
+  void dispose() {
+    for (final AudioPlayer p in <AudioPlayer>[_coin, _jump, _crash, _power]) {
+      p.dispose();
+    }
+  }
 }
