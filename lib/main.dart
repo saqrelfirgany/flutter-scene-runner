@@ -50,6 +50,17 @@ class _GamePageState extends State<GamePage>
   static const double runnerZ = 1.5;
   static const double runnerHalf = 0.5;
 
+  // --- character (Dash) ---------------------------------------------------
+  // The runner is the Flutter mascot (Dash), imported from a .glb at runtime
+  // with Node.fromGlbAsset. Until it resolves, the debug cube stands in.
+  static const String dashAsset = 'assets/models/dash.glb';
+  static const double dashScale = 0.5; // model is ~2.95u tall -> ~1.48u here
+  static const double dashYaw = math.pi; // face away from camera; flip to 0 if reversed
+  static const double dashFootY = roadTopY; // feet rest on the road surface
+  static const double dashTurnGain = 5.0; // yaw lean toward the entered lane
+  static const double dashTurnMax = 0.45;
+  static const double dashAnimBlend = 16.0; // Run/Idle/Jump crossfade speed
+
   // --- movement tuning ----------------------------------------------------
   static const double baseSpeed = 15.0;
   static const double maxSpeed = 32.0;
@@ -93,6 +104,21 @@ class _GamePageState extends State<GamePage>
   static const int particleCount = 48;
   static const double particleGravity = 16.0;
   static const double shakeDuration = 0.4;
+
+  // --- look: post-FX + neon glow (Improvement 4) --------------------------
+  // Unlit colors sit in [0,1] linear, below bloom's HDR threshold, so accent
+  // nodes are multiplied above 1.0 (see _box `glow`) to make them bloom.
+  static const double coinGlow = 2.2;
+  static const double postGlow = 2.2;
+  static const double obstacleGlow = 1.6;
+  static const double particleGlow = 2.0;
+  static const double bloomThreshold = 1.0;
+  static const double bloomIntensity = 0.55;
+  static const double bloomScatter = 0.75;
+  static const double vignetteIntensity = 0.34;
+  static const int fogHex = 0xFF131A30; // tint the far road fades into
+  static const double fogStart = 34.0; // world units from the camera
+  static const double fogEnd = 62.0;
 
   final Scene _scene = Scene();
   final ValueNotifier<int> _repaint = ValueNotifier<int>(0);
@@ -138,7 +164,17 @@ class _GamePageState extends State<GamePage>
   final List<_Obstacle> _obstacles = <_Obstacle>[];
   final List<_Coin> _coins = <_Coin>[];
   final List<_Particle> _particles = <_Particle>[];
-  late final Node _runner;
+  late final Node _runner; // debug-cube placeholder, shown until Dash loads
+  Node? _dash; // the Flutter Dash model; null until fromGlbAsset resolves
+  // Blended locomotion clips + their eased weights: Idle on the menu, Run
+  // while playing, Jump one-shot in the air. AnimationClip is unambiguous
+  // (unlike Animation, Flutter has no class by that name).
+  AnimationClip? _clipRun;
+  AnimationClip? _clipIdle;
+  AnimationClip? _clipJump;
+  double _wRun = 0;
+  double _wIdle = 1;
+  double _wJump = 0;
 
   static double _laneX(int lane) => -lane * laneWidth;
 
@@ -146,6 +182,8 @@ class _GamePageState extends State<GamePage>
   void initState() {
     super.initState();
     _buildWorld();
+    _setupSceneLook();
+    _loadDash();
     _ticker = createTicker(_onTick)..start();
     _loadScores();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -162,6 +200,7 @@ class _GamePageState extends State<GamePage>
     if (_shakeT > 0) _shakeT = math.max(0, _shakeT - dt);
     _updateParticles(dt);
     _update(dt);
+    _updateDashAnim(dt);
     _repaint.value++;
   }
 
@@ -292,7 +331,7 @@ class _GamePageState extends State<GamePage>
           math.sin(ang) * sp);
       p.maxLife = 0.5 + _rng.nextDouble() * 0.35;
       p.life = p.maxLife;
-      p.material.baseColorFactor = _linearFromHex(colorHex);
+      p.material.baseColorFactor = _glowFromHex(colorHex, particleGlow);
     }
   }
 
@@ -483,6 +522,7 @@ class _GamePageState extends State<GamePage>
     if (_grounded) {
       _grounded = false;
       _jumpV = jumpImpulse;
+      _clipJump?.replay(); // restart the jump one-shot from frame 0
     }
   }
 
@@ -515,8 +555,10 @@ class _GamePageState extends State<GamePage>
     }
     const int postColor = 0xFF4FD1C5;
     for (int j = 0; j < postCount; j++) {
-      final Node l = _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor);
-      final Node r = _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor);
+      final Node l =
+          _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor, glow: postGlow);
+      final Node r =
+          _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor, glow: postGlow);
       _postsL.add(l);
       _postsR.add(r);
       _scene.add(l);
@@ -525,13 +567,14 @@ class _GamePageState extends State<GamePage>
     const int obstacleColor = 0xFFE0533D;
     for (int i = 0; i < obstacleCount; i++) {
       final Node n = _box(vm.Vector3(obHalfX * 2, obHalfY * 2, obHalfZ * 2),
-          colorHex: obstacleColor);
+          colorHex: obstacleColor, glow: obstacleGlow);
       _obstacles.add(_Obstacle(n));
       _scene.add(n);
     }
     const int coinColor = 0xFFFFC93C;
     for (int i = 0; i < coinCount; i++) {
-      final Node n = _box(vm.Vector3(0.5, 0.5, 0.12), colorHex: coinColor);
+      final Node n =
+          _box(vm.Vector3(0.5, 0.5, 0.12), colorHex: coinColor, glow: coinGlow);
       _coins.add(_Coin(n));
       _scene.add(n);
     }
@@ -548,10 +591,112 @@ class _GamePageState extends State<GamePage>
     _scene.add(_runner);
   }
 
-  Node _box(vm.Vector3 size, {int? colorHex, bool debug = false}) {
+  /// One-time scene look: distance fog (far objects dissolve into the
+  /// background instead of popping in), neon bloom on the boosted accents, a
+  /// gentle grade, and a soft vignette. Tone mapping (pbrNeutral) and exposure
+  /// (1.0) keep their defaults, which already suit the imported Dash.
+  void _setupSceneLook() {
+    final vm.Vector4 f = _linearFromHex(fogHex);
+    _scene.fog
+      ..enabled = true
+      ..mode = FogMode.linear
+      ..color = vm.Vector3(f.r, f.g, f.b)
+      ..start = fogStart
+      ..end = fogEnd;
+
+    _scene.postProcess.bloom
+      ..enabled = true
+      ..threshold = bloomThreshold
+      ..intensity = bloomIntensity
+      ..scatter = bloomScatter;
+
+    _scene.postProcess.colorGrading
+      ..enabled = true
+      ..contrast = 1.06
+      ..saturation = 1.14;
+
+    _scene.postProcess.vignette
+      ..enabled = true
+      ..intensity = vignetteIntensity
+      ..radius = 0.82
+      ..smoothness = 0.5;
+  }
+
+  /// Imports the Dash model at runtime and wires up its locomotion clips.
+  /// The heavy glTF decode happens once, on the menu, so a brief hitch is
+  /// fine; if it throws we simply keep the placeholder cube and play on.
+  Future<void> _loadDash() async {
+    try {
+      final Node dash = await Node.fromGlbAsset(dashAsset);
+      if (!mounted) return;
+      // Run and Idle loop continuously; the blend weights (set every frame in
+      // _updateDashAnim) decide which one is visible. Jump is a one-shot,
+      // re-triggered from frame 0 by _jump().
+      final runClip =
+          _makeClip(dash, const <String>['Run', 'Walk'], loop: true);
+      if (runClip != null) {
+        runClip.weight = 0;
+        runClip.play();
+      }
+      _clipRun = runClip;
+      final idleClip =
+          _makeClip(dash, const <String>['Idle', 'Default'], loop: true);
+      if (idleClip != null) {
+        idleClip.weight = 1;
+        idleClip.play();
+      }
+      _clipIdle = idleClip;
+      final jumpClip =
+          _makeClip(dash, const <String>['Jump', 'JumpStart'], loop: false);
+      jumpClip?.weight = 0;
+      _clipJump = jumpClip;
+      _scene.add(dash);
+      _dash = dash; // the ticker repaints every frame, so paint() picks it up
+    } catch (e) {
+      debugPrint('Dash model failed to load; keeping placeholder cube: $e');
+    }
+  }
+
+  /// Creates a clip for the first animation in [names] that the model has,
+  /// falling back to the model's first animation. Returns null if the model
+  /// carries no animations at all.
+  AnimationClip? _makeClip(Node node, List<String> names, {required bool loop}) {
+    for (final String n in names) {
+      final anim = node.findAnimationByName(n);
+      if (anim != null) return node.createAnimationClip(anim)..loop = loop;
+    }
+    if (node.parsedAnimations.isNotEmpty) {
+      return node.createAnimationClip(node.parsedAnimations.first)..loop = loop;
+    }
+    return null;
+  }
+
+  /// Eases the three locomotion weights toward the pose the current game
+  /// state calls for. Runs every frame in all phases (the crashed early-out
+  /// in _update doesn't reach here), so Dash settles back to Idle on the menu
+  /// and after a crash.
+  void _updateDashAnim(double dt) {
+    if (_dash == null) return;
+    final bool playing = _phase == Phase.playing;
+    final double idleT = playing ? 0.0 : 1.0;
+    final double jumpT = (playing && !_grounded) ? 1.0 : 0.0;
+    final double runT = (playing && _grounded) ? 1.0 : 0.0;
+    final double k = dt <= 0 ? 1.0 : (1 - math.exp(-dashAnimBlend * dt));
+    _wIdle += (idleT - _wIdle) * k;
+    _wRun += (runT - _wRun) * k;
+    _wJump += (jumpT - _wJump) * k;
+    _clipIdle?.weight = _wIdle;
+    _clipRun?.weight = _wRun;
+    _clipJump?.weight = _wJump;
+  }
+
+  Node _box(vm.Vector3 size,
+      {int? colorHex, bool debug = false, double glow = 1.0}) {
     final UnlitMaterial material = UnlitMaterial();
     if (debug) material.vertexColorWeight = 1.0;
-    if (colorHex != null) material.baseColorFactor = _linearFromHex(colorHex);
+    if (colorHex != null) {
+      material.baseColorFactor = _glowFromHex(colorHex, glow);
+    }
     return Node(mesh: Mesh(CuboidGeometry(size, debugColors: debug), material));
   }
 
@@ -953,16 +1098,37 @@ class _GamePainter extends CustomPainter {
     }
 
     final double lateralV = state._runnerX - state._prevRunnerX;
-    final double lean = (lateralV * 6.0).clamp(-0.35, 0.35);
-    final double idleBob = state._grounded ? math.sin(t * 3.0) * 0.06 : 0.0;
-    final vm.Matrix4 rt = vm.Matrix4.translationValues(
-      state._runnerX,
-      _GamePageState.groundY + state._jumpY + idleBob,
-      _GamePageState.runnerZ,
-    );
-    rt.rotateZ(-lean);
-    rt.rotateY(t * 0.6);
-    state._runner.localTransform = rt;
+    final Node? dash = state._dash;
+    if (dash != null) {
+      // Dash is loaded: feet on the road, facing forward, with a small yaw
+      // lean toward the lane it's entering. The Run clip supplies the bob.
+      final double turn = (lateralV * _GamePageState.dashTurnGain)
+          .clamp(-_GamePageState.dashTurnMax, _GamePageState.dashTurnMax);
+      final vm.Matrix4 dm = vm.Matrix4.translationValues(
+        state._runnerX,
+        _GamePageState.dashFootY + state._jumpY,
+        _GamePageState.runnerZ,
+      );
+      dm.rotateY(_GamePageState.dashYaw + turn);
+      dm.scale(_GamePageState.dashScale);
+      dash.localTransform = dm;
+      // Park the placeholder cube out of view.
+      state._runner.localTransform =
+          vm.Matrix4.translationValues(0, -1000, 0);
+    } else {
+      // Placeholder cube until the model finishes importing.
+      final double lean = (lateralV * 6.0).clamp(-0.35, 0.35);
+      final double idleBob =
+          state._grounded ? math.sin(t * 3.0) * 0.06 : 0.0;
+      final vm.Matrix4 rt = vm.Matrix4.translationValues(
+        state._runnerX,
+        _GamePageState.groundY + state._jumpY + idleBob,
+        _GamePageState.runnerZ,
+      );
+      rt.rotateZ(-lean);
+      rt.rotateY(t * 0.6);
+      state._runner.localTransform = rt;
+    }
 
     for (final _Particle p in state._particles) {
       if (p.active) {
@@ -1039,4 +1205,12 @@ vm.Vector4 _linearFromHex(int hex) {
   final double g = lin((hex >> 8) & 0xFF);
   final double b = lin(hex & 0xFF);
   return vm.Vector4(r, g, b, a);
+}
+
+/// Like [_linearFromHex] but scales RGB by [glow] to push bright accents past
+/// the bloom threshold (alpha preserved). `glow == 1.0` returns it unchanged.
+vm.Vector4 _glowFromHex(int hex, double glow) {
+  final vm.Vector4 c = _linearFromHex(hex);
+  if (glow == 1.0) return c;
+  return vm.Vector4(c.r * glow, c.g * glow, c.b * glow, c.a);
 }

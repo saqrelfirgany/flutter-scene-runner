@@ -60,6 +60,12 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
+  # 3D character model (Flutter's mascot, Dash), imported at runtime via
+  # Node.fromGlbAsset. README media under assets/ is intentionally NOT listed
+  # here, so only this model is bundled into the app.
+  assets:
+    - assets/models/dash.glb
+
   # To add assets to your application, add an assets section, like this:
   # assets:
   #   - images/a_dot_burr.jpeg
