@@ -11,9 +11,9 @@ class _Obstacle {
   double z = 0;
 }
 
+/// A pooled coin. Carries **no `Node`** — coins are one `InstancedMesh`, and a
+/// coin's position in `_coins` is its instance index.
 class _Coin {
-  _Coin(this.node);
-  final Node node;
   bool active = false;
   int lane = 0;
   double z = 0;
@@ -60,15 +60,43 @@ class _Popup {
   static const double life = 0.85;
 }
 
+/// A pooled particle. Like [_Coin] it carries no `Node`: particles are
+/// instanced, and a particle's index within its pool is its instance index.
 class _Particle {
-  _Particle(this.node, this.material);
-  final Node node;
-  final UnlitMaterial material;
   bool active = false;
   final vm.Vector3 pos = vm.Vector3.zero();
   final vm.Vector3 vel = vm.Vector3.zero();
   double life = 0;
   double maxLife = 1;
+}
+
+/// One instanced set of particles, all sharing a colour.
+///
+/// Instancing binds a single material for the whole batch, so recolouring a
+/// particle at spawn — which is what the old per-particle `UnlitMaterial` did
+/// — is impossible. Splitting the fixed set of burst colours into their own
+/// pools buys the draw-call win back without losing the colour coding: a
+/// burst just picks the pool matching its colour.
+class _ParticlePool {
+  _ParticlePool(this.colorHex, this.mesh, int count) {
+    for (int i = 0; i < count; i++) {
+      parts.add(_Particle());
+      mesh.addInstance(vm.Matrix4.identity());
+    }
+  }
+
+  final int colorHex;
+  final InstancedMesh mesh;
+  final List<_Particle> parts = <_Particle>[];
+
+  /// First inactive particle, or null when the pool is exhausted (a burst
+  /// then simply emits fewer than it asked for, which is invisible in play).
+  _Particle? free() {
+    for (final _Particle p in parts) {
+      if (!p.active) return p;
+    }
+    return null;
+  }
 }
 
 // Colour conversion lives in `game_math.dart` so it is unit-testable; these

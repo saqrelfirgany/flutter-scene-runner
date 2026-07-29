@@ -198,19 +198,27 @@ class _GamePainter extends CustomPainter {
       }
     }
 
-    for (final _Coin c in state._coins) {
-      if (c.active) {
-        // c.y, not the coinY const — an arc gives every coin its own height.
-        final vm.Matrix4 m = c.node.localTransform;
-        m.setIdentity();
-        m.setTranslationRaw(c.cx, c.y, c.z);
-        m.rotateY(t * 4.0);
-        // Applied last, so it runs first: stands the cylinder on edge (its Y
-        // axis becomes world Z) before the spin about world Y flashes it.
-        m.rotateX(math.pi / 2);
-        c.node.markTransformDirty();
-      } else {
-        _park(c.node);
+    // Coins are instanced, so an inactive one cannot be parked at y = -1000
+    // the way a pooled Node is: the set's aggregate bounds would stretch a
+    // thousand units and the whole batch would stop frustum-culling. A zero
+    // scale collapses it to degenerate triangles instead — nothing rasterises
+    // and the bounds stay tight.
+    final InstancedMesh? coinMesh = state._coinMesh;
+    if (coinMesh != null) {
+      for (int i = 0; i < state._coins.length; i++) {
+        final _Coin c = state._coins[i];
+        _scratch.setIdentity();
+        if (c.active) {
+          // c.y, not the coinY const — an arc gives every coin its own height.
+          _scratch.setTranslationRaw(c.cx, c.y, c.z);
+          _scratch.rotateY(t * 4.0);
+          // Applied last, so it runs first: stands the cylinder on edge (its
+          // Y axis becomes world Z) before the spin about world Y flashes it.
+          _scratch.rotateX(math.pi / 2);
+        } else {
+          _scratch.scaleByDouble(0.0, 0.0, 0.0, 1.0);
+        }
+        coinMesh.setInstanceTransform(i, _scratch);
       }
     }
 
@@ -263,18 +271,23 @@ class _GamePainter extends CustomPainter {
       state._runner.markTransformDirty();
     }
 
-    for (final _Particle p in state._particles) {
-      if (p.active) {
-        final double s = (p.life / p.maxLife).clamp(0.0, 1.0);
-        final double sc = 0.25 + 0.75 * s;
-        final vm.Matrix4 pm = p.node.localTransform;
-        pm.setIdentity();
-        pm.setTranslationRaw(p.pos.x, p.pos.y, p.pos.z);
-        pm.rotateY(t * 6.0);
-        pm.scaleByDouble(sc, sc, sc, 1.0);
-        p.node.markTransformDirty();
-      } else {
-        _park(p.node);
+    // Particles are instanced per colour. Inactive ones collapse to a zero
+    // scale for the same reason coins do — parking far away would wreck the
+    // set's bounds and disable frustum culling for the whole batch.
+    for (final _ParticlePool pool in state._particlePools) {
+      for (int i = 0; i < pool.parts.length; i++) {
+        final _Particle p = pool.parts[i];
+        _scratch.setIdentity();
+        if (p.active) {
+          final double s = (p.life / p.maxLife).clamp(0.0, 1.0);
+          final double sc = 0.25 + 0.75 * s;
+          _scratch.setTranslationRaw(p.pos.x, p.pos.y, p.pos.z);
+          _scratch.rotateY(t * 6.0);
+          _scratch.scaleByDouble(sc, sc, sc, 1.0);
+        } else {
+          _scratch.scaleByDouble(0.0, 0.0, 0.0, 1.0);
+        }
+        pool.mesh.setInstanceTransform(i, _scratch);
       }
     }
 

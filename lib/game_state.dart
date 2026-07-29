@@ -83,10 +83,23 @@ class _GamePageState extends State<GamePage>
   static const Color cTeal = Color(0xFF4FD1C5);
   static const Color cGold = Color(0xFFFFC93C);
   static const Color cRed = Color(0xFFE0533D);
+  static const int cCoin = 0xFFFFC93C; // coin gold, also its pickup sparkle
+  static const int cCrash = 0xFFE0533D; // crash burst
   static const Color cBg = Color(0xFF0E1220);
 
   // --- juice (Day 3B) -----------------------------------------------------
-  static const int particleCount = 48;
+  // Particles are instanced per colour (see `_ParticlePool`), so the pool set
+  // is fixed at build: every colour a burst can ask for needs its own entry.
+  // A colour missing from this list falls back to the first pool.
+  static const List<int> particleColors = <int>[
+    cCoin,
+    cCrash,
+    cMagnet,
+    cShield,
+    cDouble,
+  ];
+  // Sized for the largest single burst (the 22-particle crash) plus headroom.
+  static const int particlesPerColor = 24;
   static const double particleGravity = 16.0;
   static const double shakeDuration = 0.4;
 
@@ -283,6 +296,9 @@ class _GamePageState extends State<GamePage>
   InstancedMesh? _tilesA;
   InstancedMesh? _tilesB;
   InstancedMesh? _dashes;
+  // Pooled coins share one geometry and material, so they are instanced too;
+  // a coin's index in `_coins` IS its instance index.
+  InstancedMesh? _coinMesh;
   final List<Node> _postsL = <Node>[]; // roadside trees
   final List<Node> _postsR = <Node>[];
   final List<Node> _housesL = <Node>[]; // background houses
@@ -316,7 +332,7 @@ class _GamePageState extends State<GamePage>
   final List<_Obstacle> _obstacles = <_Obstacle>[];
   final List<_Coin> _coins = <_Coin>[];
   final List<_PowerUp> _powerups = <_PowerUp>[];
-  final List<_Particle> _particles = <_Particle>[];
+  final List<_ParticlePool> _particlePools = <_ParticlePool>[];
   late final Node _runner; // debug-cube placeholder, shown until Dash loads
   Node? _dash; // the Flutter Dash model; null until fromGlbAsset resolves
   // Blended locomotion clips + their eased weights: Idle on the menu, Run
@@ -665,11 +681,15 @@ class _GamePageState extends State<GamePage>
     }
   }
 
+  /// Emits a burst from the pool whose colour matches [colorHex]. The colour
+  /// is baked into the pool's material at build time, so it selects a pool
+  /// rather than recolouring anything.
   void _spawnParticles(double x, double y, double z, int count, int colorHex,
       double spread, double lift) {
+    final _ParticlePool pool = _poolFor(colorHex);
     for (int n = 0; n < count; n++) {
-      final _Particle? p = _freeParticle();
-      if (p == null) return;
+      final _Particle? p = pool.free();
+      if (p == null) return; // pool exhausted; emit what we got
       p.active = true;
       p.pos.setValues(x, y, z);
       final double ang = _rng.nextDouble() * math.pi * 2;
@@ -678,29 +698,30 @@ class _GamePageState extends State<GamePage>
           math.sin(ang) * sp);
       p.maxLife = 0.5 + _rng.nextDouble() * 0.35;
       p.life = p.maxLife;
-      p.material.baseColorFactor = _glowFromHex(colorHex, particleGlow);
     }
   }
 
-  _Particle? _freeParticle() {
-    for (final _Particle p in _particles) {
-      if (!p.active) return p;
+  _ParticlePool _poolFor(int colorHex) {
+    for (final _ParticlePool pool in _particlePools) {
+      if (pool.colorHex == colorHex) return pool;
     }
-    return null;
+    return _particlePools.first; // unlisted colour: wrong tint beats no burst
   }
 
   void _updateParticles(double dt) {
-    for (final _Particle p in _particles) {
-      if (!p.active) continue;
-      p.life -= dt;
-      if (p.life <= 0) {
-        p.active = false;
-        continue;
+    for (final _ParticlePool pool in _particlePools) {
+      for (final _Particle p in pool.parts) {
+        if (!p.active) continue;
+        p.life -= dt;
+        if (p.life <= 0) {
+          p.active = false;
+          continue;
+        }
+        p.vel.y -= particleGravity * dt;
+        p.pos.x += p.vel.x * dt;
+        p.pos.y += p.vel.y * dt;
+        p.pos.z += p.vel.z * dt;
       }
-      p.vel.y -= particleGravity * dt;
-      p.pos.x += p.vel.x * dt;
-      p.pos.y += p.vel.y * dt;
-      p.pos.z += p.vel.z * dt;
     }
   }
 
@@ -834,8 +855,10 @@ class _GamePageState extends State<GamePage>
     for (final _Ramp r in _ramps) {
       r.active = false;
     }
-    for (final _Particle p in _particles) {
-      p.active = false;
+    for (final _ParticlePool pool in _particlePools) {
+      for (final _Particle p in pool.parts) {
+        p.active = false;
+      }
     }
     _rampSpawnTimer = rampFirstDelay;
     _powerSpawnTimer = powerFirstDelay;
@@ -1157,24 +1180,24 @@ class _GamePageState extends State<GamePage>
     }
     // Coins are upright discs (a cylinder stood on edge by the painter), not
     // flat cards — that is what gives the reference its edge-on/face-on flash
-    // as they spin.
-    const int coinColor = 0xFFFFC93C;
+    // as they spin. All 36 share one geometry and one material, so they are a
+    // single instanced set: 36 draw calls become 1.
+    final PhysicallyBasedMaterial coinMat = PhysicallyBasedMaterial()
+      ..baseColorFactor = _linearFromHex(cCoin)
+      ..roughnessFactor = 0.3
+      ..metallicFactor = 1.0;
+    _coinMesh = InstancedMesh(
+        geometry: CylinderGeometry(
+            bottomRadius: coinRadius,
+            topRadius: coinRadius,
+            height: 0.1,
+            radialSegments: 14),
+        material: coinMat);
     for (int i = 0; i < coinCount; i++) {
-      final PhysicallyBasedMaterial cm = PhysicallyBasedMaterial()
-        ..baseColorFactor = _linearFromHex(coinColor)
-        ..roughnessFactor = 0.3
-        ..metallicFactor = 1.0;
-      final Node n = Node(
-          mesh: Mesh(
-              CylinderGeometry(
-                  bottomRadius: coinRadius,
-                  topRadius: coinRadius,
-                  height: 0.1,
-                  radialSegments: 14),
-              cm));
-      _coins.add(_Coin(n));
-      _scene.add(n);
+      _coins.add(_Coin());
+      _coinMesh!.addInstance(vm.Matrix4.identity());
     }
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_coinMesh!)));
     for (int i = 0; i < powerupCount; i++) {
       final UnlitMaterial mat = UnlitMaterial()
         ..baseColorFactor = _glowFromHex(cMagnet, powerGlow);
@@ -1184,13 +1207,16 @@ class _GamePageState extends State<GamePage>
       _powerups.add(_PowerUp(n, mat));
       _scene.add(n);
     }
-    for (int i = 0; i < particleCount; i++) {
+    // One instanced set per burst colour. Unlit on purpose: a spark should
+    // read at full brightness regardless of where the sun is.
+    for (final int hex in particleColors) {
       final UnlitMaterial mat = UnlitMaterial()
-        ..baseColorFactor = _linearFromHex(0xFFFFC93C);
-      final Node n =
-          Node(mesh: Mesh(CuboidGeometry(vm.Vector3(0.18, 0.18, 0.18)), mat));
-      _particles.add(_Particle(n, mat));
-      _scene.add(n);
+        ..baseColorFactor = _glowFromHex(hex, particleGlow);
+      final InstancedMesh mesh = InstancedMesh(
+          geometry: CuboidGeometry(vm.Vector3(0.18, 0.18, 0.18)),
+          material: mat);
+      _particlePools.add(_ParticlePool(hex, mesh, particlesPerColor));
+      _scene.add(Node()..addComponent(InstancedMeshComponent(mesh)));
     }
 
     _runner = _box(vm.Vector3(1.0, 1.0, 1.0), debug: true);
