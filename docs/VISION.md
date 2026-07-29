@@ -148,7 +148,10 @@ model in `CLAUDE.md` § "Performance model"; the headlines:
   once instead of every frame.
 - **Zero-allocation painter** — ~1,600 transforms a frame now write in place
   instead of allocating a `Matrix4` each.
-- **Road tiles + lane dividers instanced** — 54 draw calls down to 3.
+- **Instancing pass** — road tiles, lane dividers, coins, particles and houses
+  all converted from individual nodes to instanced sets: **178 draw calls down
+  to 16**. Trees (72) and pooled obstacles (~72) are the remaining candidates;
+  the recipe is written up in `CLAUDE.md`.
 - **Quality presets** via `Scene.renderScale` (HIGH · BALANCED · FAST).
 - **First tests in the project**: `lib/game_math.dart` holds the GPU-free
   gameplay math and `test/game_math_test.dart` covers it, 21 cases. The game
