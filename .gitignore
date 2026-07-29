@@ -34,3 +34,7 @@ app.*.map.json
 
 # FVM (keep .fvmrc tracked so the repo stays pinned to master; ignore the cache)
 .fvm/
+
+# Look-and-feel reference screenshots — local aid for coding agents, not shipped
+# (they're another game's frames; kept out of the portfolio history on purpose)
+docs/target-reference/
