@@ -18,6 +18,21 @@ class _Coin {
   int lane = 0;
   double z = 0;
   double cx = 0; // continuous x; eased toward the runner while a magnet is up
+  double y = 0; // per-coin height, so a line can be laid out as a rising arc
+  // Where cx settles when no magnet is pulling. Not simply the lane centre:
+  // a drifting trail places each coin part-way between two lanes, and easing
+  // back to the lane centre would straighten the curve out.
+  double restX = 0;
+}
+
+/// A launch ramp. Additive only — it never blocks the runner, it just
+/// replaces a grounded jump with a stronger one while overlapped.
+class _Ramp {
+  _Ramp(this.node);
+  final Node node;
+  bool active = false;
+  int lane = 0;
+  double z = 0;
 }
 
 class _PowerUp {
@@ -36,6 +51,15 @@ class _Score {
   final int score;
 }
 
+class _Popup {
+  _Popup(this.text, this.x, this.y);
+  final String text;
+  final double x; // screen x (fixed at spawn)
+  double y; // screen y (rises over life)
+  double age = 0;
+  static const double life = 0.85;
+}
+
 class _Particle {
   _Particle(this.node, this.material);
   final Node node;
@@ -47,23 +71,12 @@ class _Particle {
   double maxLife = 1;
 }
 
-/// Convert a 0xAARRGGBB sRGB value to a linear-space RGBA for baseColorFactor.
-vm.Vector4 _linearFromHex(int hex) {
-  double lin(int c) => math.pow(c / 255.0, 2.2).toDouble();
-  final double a = ((hex >> 24) & 0xFF) / 255.0;
-  final double r = lin((hex >> 16) & 0xFF);
-  final double g = lin((hex >> 8) & 0xFF);
-  final double b = lin(hex & 0xFF);
-  return vm.Vector4(r, g, b, a);
-}
+// Colour conversion lives in `game_math.dart` so it is unit-testable; these
+// two are the library-private aliases the rest of the game calls, kept so the
+// ~30 existing call sites read the same as before.
+vm.Vector4 _linearFromHex(int hex) => gm.linearFromHex(hex);
 
-/// Like [_linearFromHex] but scales RGB by [glow] to push bright accents past
-/// the bloom threshold (alpha preserved). `glow == 1.0` returns it unchanged.
-vm.Vector4 _glowFromHex(int hex, double glow) {
-  final vm.Vector4 c = _linearFromHex(hex);
-  if (glow == 1.0) return c;
-  return vm.Vector4(c.r * glow, c.g * glow, c.b * glow, c.a);
-}
+vm.Vector4 _glowFromHex(int hex, double glow) => gm.glowFromHex(hex, glow);
 
 /// Tiny SFX wrapper: one reusable player per sound, played from bundled WAVs.
 /// [volume] `0` mutes (playback is skipped); failures are swallowed so audio

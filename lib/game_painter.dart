@@ -3,74 +3,231 @@
 // library-private access (e.g. _GamePainter reads _GamePageState fields).
 part of 'main.dart';
 
+/// Owns **every** per-frame transform write, the camera, and `scene.render()`.
+///
+/// The simulation (`_GamePageState._update`) never touches a scene node; this
+/// painter never touches gameplay state. That split is what keeps a 60 Hz
+/// ticker and a `CustomPainter` from fighting over the same data.
+///
+/// ## Allocation policy
+///
+/// This method runs 60 times a second over ~1,600 transforms. Allocating a
+/// `Matrix4` per transform would churn ~1,600 objects per frame (~96k/s), so
+/// nothing here allocates. Two different techniques, because the two sinks
+/// have different ownership rules:
+///
+/// * **Instanced meshes** — `InstancedMesh.setInstanceTransform` does
+///   `_instances[i].setFrom(m)`, i.e. it *copies*. One shared [_scratch]
+///   matrix is therefore safe for every instance of every mesh.
+/// * **Scene nodes** — `Node.localTransform`'s setter stores the reference it
+///   is handed. A shared scratch would alias every node onto one matrix. So
+///   nodes are updated by mutating *their own* matrix in place and calling
+///   `markTransformDirty()`, which is exactly what that method is documented
+///   for. See [_place].
 class _GamePainter extends CustomPainter {
   _GamePainter({required this.state, required Listenable repaint})
       : super(repaint: repaint);
 
   final _GamePageState state;
 
+  /// Shared scratch for instanced writes only — never assigned to a node.
+  static final vm.Matrix4 _scratch = vm.Matrix4.identity();
+
+  /// Moves [node] to (x, y, z) without allocating.
+  ///
+  /// Assigning `localTransform` would store a new matrix and mark the node
+  /// dirty for us; mutating in place skips the allocation but leaves the
+  /// cached world transform stale, hence the explicit `markTransformDirty()`.
+  static void _place(Node node, double x, double y, double z) {
+    final vm.Matrix4 m = node.localTransform;
+    m.setIdentity();
+    m.setTranslationRaw(x, y, z);
+    node.markTransformDirty();
+  }
+
+  /// Parks a pooled node out of sight. Despawning never removes a node from
+  /// the scene (see the pooling contract in CLAUDE.md) — it hides it here.
+  static void _park(Node node) => _place(node, 0, -1000, 0);
+
   @override
   void paint(Canvas canvas, Size size) {
     final double scroll = state._scrollZ;
     final double t = state._elapsed;
 
-    double wrapZ(double phase) =>
-        _GamePageState.zFar + ((phase + scroll) % _GamePageState.totalLen);
+    // The endless-scroll illusion: a node's fixed phase offset is mapped into
+    // the visible span [zFar, zFar + totalLen). Nothing actually travels the
+    // length of the world, and the camera never moves forward.
+    double wrapZ(double phase) => gm.wrapZ(
+        phase, scroll, _GamePageState.zFar, _GamePageState.totalLen);
 
-    for (int i = 0; i < state._tiles.length; i++) {
-      final double z = wrapZ(i * _GamePageState.segLen);
-      state._tiles[i].localTransform =
-          vm.Matrix4.translationValues(0, _GamePageState.roadTopY - 0.1, z);
+    // ---- road surface (instanced) -----------------------------------------
+    // Tiles alternate two asphalt tones, so they are two instanced sets rather
+    // than one: per-instance colour is not a thing, only per-instance
+    // transform. Set A holds the even tiles, set B the odd ones.
+    for (int pass = 0; pass < 2; pass++) {
+      final InstancedMesh? tiles = pass == 0 ? state._tilesA : state._tilesB;
+      if (tiles == null) continue;
+      final int n = tiles.instanceCount;
+      for (int j = 0; j < n; j++) {
+        final int tileIndex = j * 2 + pass;
+        _scratch.setIdentity();
+        _scratch.setTranslationRaw(0, _GamePageState.roadTopY - 0.1,
+            wrapZ(tileIndex * _GamePageState.segLen));
+        tiles.setInstanceTransform(j, _scratch);
+      }
     }
 
-    for (int k = 0; k < state._dashesL.length; k++) {
-      final double z = wrapZ(k * _GamePageState.dashSpacing);
-      state._dashesL[k].localTransform = vm.Matrix4.translationValues(
-          -_GamePageState.laneWidth / 2, _GamePageState.roadTopY + 0.02, z);
-      state._dashesR[k].localTransform = vm.Matrix4.translationValues(
-          _GamePageState.laneWidth / 2, _GamePageState.roadTopY + 0.02, z);
+    // Lane dividers: [0, n) is the left line, [n, 2n) the right.
+    final InstancedMesh? dashes = state._dashes;
+    if (dashes != null) {
+      const int nDash = _GamePageState.dashCount;
+      for (int i = 0; i < nDash * 2; i++) {
+        final double side = i < nDash ? -1.0 : 1.0;
+        _scratch.setIdentity();
+        _scratch.setTranslationRaw(
+            side * _GamePageState.laneWidth / 2,
+            _GamePageState.roadTopY + 0.02,
+            wrapZ((i % nDash) * _GamePageState.dashSpacing));
+        dashes.setInstanceTransform(i, _scratch);
+      }
     }
 
-    const double postX = _GamePageState.roadWidth / 2 + 0.6;
+    // ---- roadside props (individual nodes) --------------------------------
+    // Trees and houses stay individual because each carries its own foliage or
+    // roof colour, and instancing shares one material across the whole set.
     for (int j = 0; j < state._postsL.length; j++) {
       final double z = wrapZ(j * _GamePageState.postSpacing);
-      state._postsL[j].localTransform = vm.Matrix4.translationValues(
-          -postX, _GamePageState.roadTopY + 0.5, z);
-      state._postsR[j].localTransform = vm.Matrix4.translationValues(
-          postX, _GamePageState.roadTopY + 0.5, z);
+      _place(state._postsL[j], -_GamePageState.treeX, _GamePageState.roadTopY, z);
+      _place(state._postsR[j], _GamePageState.treeX, _GamePageState.roadTopY, z);
+    }
+
+    for (int j = 0; j < state._housesL.length; j++) {
+      final double z = wrapZ(
+          j * _GamePageState.houseSpacing + _GamePageState.houseSpacing / 2);
+      _place(
+          state._housesL[j], -_GamePageState.houseX, _GamePageState.roadTopY, z);
+      _place(
+          state._housesR[j], _GamePageState.houseX, _GamePageState.roadTopY, z);
+    }
+
+    // ---- scattered scenery (instanced, data-driven) -----------------------
+    // Each set is one draw call regardless of count (hardware instancing — see
+    // CLAUDE.md). Data layout is (x, phaseZ, scale) for Vector3 sets and
+    // (x, phaseZ, scale, yaw) for the grass.
+    _scatteredPass(state._rocks, state._rockData, _GamePageState.roadTopY - 0.15,
+        wrapZ);
+    _scatteredPass(
+        state._bushes, state._bushData, _GamePageState.roadTopY, wrapZ);
+    _scatteredPass(state._flowersA, state._flowerAData,
+        _GamePageState.roadTopY + 0.05, wrapZ);
+    _scatteredPass(state._flowersB, state._flowerBData,
+        _GamePageState.roadTopY + 0.05, wrapZ);
+
+    _grassPass(state._grassA, state._grassAData, _GamePageState.roadTopY + 0.1,
+        wrapZ);
+    _grassPass(state._grassB, state._grassBData, _GamePageState.roadTopY + 0.08,
+        wrapZ);
+    _grassPass(state._grassC, state._grassCData, _GamePageState.roadTopY + 0.12,
+        wrapZ);
+
+    // ---- evenly-spaced scenery (instanced, index-derived) -----------------
+    // No scatter data at all: side and z fall out of the instance index.
+    // [0, n) is the left shoulder, [n, 2n) the right.
+    final InstancedMesh? rails = state._rails;
+    if (rails != null) {
+      const int nRail = _GamePageState.railCount;
+      for (int i = 0; i < nRail * 2; i++) {
+        final double side = i < nRail ? -1.0 : 1.0;
+        _scratch.setIdentity();
+        _scratch.setTranslationRaw(side * _GamePageState.railX,
+            _GamePageState.railY, wrapZ((i % nRail) * _GamePageState.railSpacing));
+        rails.setInstanceTransform(i, _scratch);
+      }
+    }
+    final InstancedMesh? railPosts = state._railPosts;
+    if (railPosts != null) {
+      const int nPost = _GamePageState.railPostCount;
+      for (int i = 0; i < nPost * 2; i++) {
+        final double side = i < nPost ? -1.0 : 1.0;
+        _scratch.setIdentity();
+        _scratch.setTranslationRaw(
+            side * _GamePageState.railX,
+            _GamePageState.roadTopY + 0.33,
+            wrapZ((i % nPost) * _GamePageState.railSpacing * 2));
+        railPosts.setInstanceTransform(i, _scratch);
+      }
+    }
+    final InstancedMesh? poles = state._signPoles;
+    final InstancedMesh? boards = state._signBoards;
+    if (poles != null && boards != null) {
+      const int nSign = _GamePageState.signCount;
+      for (int i = 0; i < nSign * 2; i++) {
+        final double side = i < nSign ? -1.0 : 1.0;
+        // The right side is offset half a spacing so the two sides interleave
+        // instead of arriving in pairs.
+        final double z = wrapZ((i % nSign) * _GamePageState.signSpacing +
+            (side > 0 ? _GamePageState.signSpacing / 2 : 0.0));
+        final double x = side * _GamePageState.signX;
+        _scratch.setIdentity();
+        _scratch.setTranslationRaw(x, _GamePageState.roadTopY + 1.0, z);
+        poles.setInstanceTransform(i, _scratch);
+        _scratch.setIdentity();
+        _scratch.setTranslationRaw(x, _GamePageState.roadTopY + 1.75, z + 0.05);
+        boards.setInstanceTransform(i, _scratch);
+      }
+    }
+
+    // ---- pooled gameplay objects ------------------------------------------
+    for (final _Ramp r in state._ramps) {
+      if (r.active) {
+        _place(r.node, _GamePageState._laneX(r.lane), _GamePageState.roadTopY,
+            r.z);
+      } else {
+        _park(r.node);
+      }
     }
 
     for (final _Obstacle o in state._obstacles) {
       if (o.active) {
-        o.node.localTransform = vm.Matrix4.translationValues(
-            _GamePageState._laneX(o.lane), _GamePageState.obstacleCenterY, o.z);
+        // Composite obstacles are built base-at-origin, so they sit on the
+        // road surface (roadTopY); collision still uses obstacleCenterY.
+        _place(o.node, _GamePageState._laneX(o.lane), _GamePageState.roadTopY,
+            o.z);
       } else {
-        o.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
+        _park(o.node);
       }
     }
 
     for (final _Coin c in state._coins) {
       if (c.active) {
-        final vm.Matrix4 m =
-            vm.Matrix4.translationValues(c.cx, _GamePageState.coinY, c.z);
+        // c.y, not the coinY const — an arc gives every coin its own height.
+        final vm.Matrix4 m = c.node.localTransform;
+        m.setIdentity();
+        m.setTranslationRaw(c.cx, c.y, c.z);
         m.rotateY(t * 4.0);
-        c.node.localTransform = m;
+        // Applied last, so it runs first: stands the cylinder on edge (its Y
+        // axis becomes world Z) before the spin about world Y flashes it.
+        m.rotateX(math.pi / 2);
+        c.node.markTransformDirty();
       } else {
-        c.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
+        _park(c.node);
       }
     }
 
     for (final _PowerUp p in state._powerups) {
       if (p.active) {
-        final vm.Matrix4 m = vm.Matrix4.translationValues(
+        final vm.Matrix4 m = p.node.localTransform;
+        m.setIdentity();
+        m.setTranslationRaw(
             _GamePageState._laneX(p.lane), _GamePageState.powerY, p.z);
         m.rotateY(t * 2.5);
-        p.node.localTransform = m;
+        p.node.markTransformDirty();
       } else {
-        p.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
+        _park(p.node);
       }
     }
 
+    // ---- the runner --------------------------------------------------------
     final double lateralV = state._runnerX - state._prevRunnerX;
     final Node? dash = state._dash;
     if (dash != null) {
@@ -78,45 +235,50 @@ class _GamePainter extends CustomPainter {
       // lean toward the lane it's entering. The Run clip supplies the bob.
       final double turn = (lateralV * _GamePageState.dashTurnGain)
           .clamp(-_GamePageState.dashTurnMax, _GamePageState.dashTurnMax);
-      final vm.Matrix4 dm = vm.Matrix4.translationValues(
+      final vm.Matrix4 dm = dash.localTransform;
+      dm.setIdentity();
+      dm.setTranslationRaw(
         state._runnerX,
         _GamePageState.dashFootY + state._jumpY,
         _GamePageState.runnerZ,
       );
       dm.rotateY(_GamePageState.dashYaw + turn);
-      dm.scale(_GamePageState.dashScale);
-      dash.localTransform = dm;
-      // Park the placeholder cube out of view.
-      state._runner.localTransform =
-          vm.Matrix4.translationValues(0, -1000, 0);
+      dm.scaleByDouble(_GamePageState.dashScale, _GamePageState.dashScale,
+          _GamePageState.dashScale, 1.0);
+      dash.markTransformDirty();
+      _park(state._runner); // hide the placeholder cube
     } else {
       // Placeholder cube until the model finishes importing.
       final double lean = (lateralV * 6.0).clamp(-0.35, 0.35);
-      final double idleBob =
-          state._grounded ? math.sin(t * 3.0) * 0.06 : 0.0;
-      final vm.Matrix4 rt = vm.Matrix4.translationValues(
+      final double idleBob = state._grounded ? math.sin(t * 3.0) * 0.06 : 0.0;
+      final vm.Matrix4 rt = state._runner.localTransform;
+      rt.setIdentity();
+      rt.setTranslationRaw(
         state._runnerX,
         _GamePageState.groundY + state._jumpY + idleBob,
         _GamePageState.runnerZ,
       );
       rt.rotateZ(-lean);
       rt.rotateY(t * 0.6);
-      state._runner.localTransform = rt;
+      state._runner.markTransformDirty();
     }
 
     for (final _Particle p in state._particles) {
       if (p.active) {
         final double s = (p.life / p.maxLife).clamp(0.0, 1.0);
-        final vm.Matrix4 pm =
-            vm.Matrix4.translationValues(p.pos.x, p.pos.y, p.pos.z);
-        pm.scale(0.25 + 0.75 * s);
+        final double sc = 0.25 + 0.75 * s;
+        final vm.Matrix4 pm = p.node.localTransform;
+        pm.setIdentity();
+        pm.setTranslationRaw(p.pos.x, p.pos.y, p.pos.z);
         pm.rotateY(t * 6.0);
-        p.node.localTransform = pm;
+        pm.scaleByDouble(sc, sc, sc, 1.0);
+        p.node.markTransformDirty();
       } else {
-        p.node.localTransform = vm.Matrix4.translationValues(0, -1000, 0);
+        _park(p.node);
       }
     }
 
+    // ---- camera ------------------------------------------------------------
     double shx = 0;
     double shy = 0;
     if (state._shakeT > 0) {
@@ -127,13 +289,90 @@ class _GamePainter extends CustomPainter {
 
     final double camX = state._runnerX * 0.35;
     final PerspectiveCamera camera = PerspectiveCamera(
-      position: vm.Vector3(camX + shx, 2.6 + shy, 9.0),
-      target: vm.Vector3(state._runnerX * 0.5, -1.4, -15.0),
+      position: vm.Vector3(
+          camX + shx, _GamePageState.camY + shy, _GamePageState.camZ),
+      target: vm.Vector3(state._runnerX * 0.5, _GamePageState.camTargetY,
+          _GamePageState.camTargetZ),
     );
 
+    // Cached for `_spawnPopup`, which projects a world point to screen space
+    // with the camera the frame was actually drawn from.
+    state._lastCamera = camera;
+    state._lastViewport = size;
     state._scene.render(camera, canvas, viewport: Offset.zero & size);
   }
 
+  /// Scrolls one scattered set whose per-instance data is (x, phaseZ, scale).
+  void _scatteredPass(InstancedMesh? mesh, List<vm.Vector3> data, double y,
+      double Function(double) wrapZ) {
+    if (mesh == null) return;
+    for (int i = 0; i < data.length; i++) {
+      final vm.Vector3 d = data[i];
+      _scratch.setIdentity();
+      _scratch.setTranslationRaw(d.x, y, wrapZ(d.y));
+      _scratch.scaleByDouble(d.z, d.z, d.z, 1.0);
+      mesh.setInstanceTransform(i, _scratch);
+    }
+  }
+
+  /// Scrolls one grass set. Same as [_scatteredPass] plus a per-blade yaw, so
+  /// the 3-sided blades do not all face the same way.
+  void _grassPass(InstancedMesh? mesh, List<vm.Vector4> data, double y,
+      double Function(double) wrapZ) {
+    if (mesh == null) return;
+    for (int i = 0; i < data.length; i++) {
+      final vm.Vector4 d = data[i];
+      _scratch.setIdentity();
+      _scratch.setTranslationRaw(d.x, y, wrapZ(d.y));
+      _scratch.rotateY(d.w);
+      _scratch.scaleByDouble(d.z, d.z, d.z, 1.0);
+      mesh.setInstanceTransform(i, _scratch);
+    }
+  }
+
+  /// Repaints are driven by the `_repaint` notifier passed to
+  /// `CustomPainter(repaint:)`, so this correctly stays `false`. Returning
+  /// `true` would repaint twice per frame.
   @override
   bool shouldRepaint(covariant _GamePainter oldDelegate) => false;
+}
+
+/// Soft drifting clouds for the sky layer.
+///
+/// Deliberately a Flutter painter rather than scene geometry: the scene's
+/// distance fog ends at `fogEndDay` and resolves to `cSkyBot`, so a cloud
+/// placed far enough away to read as sky would be fully fogged out. Drawn
+/// between the sky gradient and the 3D layer in `build()`.
+class _CloudPainter extends CustomPainter {
+  _CloudPainter(this.t);
+
+  final double t;
+
+  static const int _count = 6;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint p = Paint()
+      ..color = Colors.white.withValues(alpha: 0.72)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 14);
+    for (int i = 0; i < _count; i++) {
+      final double w = size.width * (0.17 + (i % 3) * 0.06);
+      final double speed = 5.0 + (i % 4) * 2.5;
+      // Wrap over 1.3 screens so a cloud fully leaves before it re-enters.
+      final double x =
+          ((i * 0.23 + t * speed / 1000.0) % 1.3 - 0.15) * size.width;
+      final double y = size.height * (0.07 + (i % 3) * 0.075);
+      canvas.drawOval(
+          Rect.fromCenter(center: Offset(x, y), width: w, height: w * 0.33), p);
+      canvas.drawOval(
+          Rect.fromCenter(
+              center: Offset(x + w * 0.2, y - w * 0.08),
+              width: w * 0.58,
+              height: w * 0.3),
+          p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _CloudPainter oldDelegate) => oldDelegate.t != t;
 }

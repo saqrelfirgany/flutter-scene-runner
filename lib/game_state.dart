@@ -28,11 +28,23 @@ class _GamePageState extends State<GamePage>
   static const double dashTurnMax = 0.45;
   static const double dashAnimBlend = 16.0; // Run/Idle/Jump crossfade speed
 
+  // --- camera -------------------------------------------------------------
+  // Pulled in and down toward the reference framing, where Dash fills much
+  // more of the frame. These four are the knobs to nudge by eye — nothing
+  // else in the sim depends on them.
+  static const double camY = 2.35;
+  static const double camZ = 8.0;
+  static const double camTargetY = -1.15;
+  static const double camTargetZ = -16.0;
+
   // --- movement tuning ----------------------------------------------------
   static const double baseSpeed = 15.0;
   static const double maxSpeed = 32.0;
   static const double speedRampPerSec = 0.45;
   static const double laneLerp = 12.0;
+  /// Frame deltas are clamped to this before any integration, so a hitch
+  /// cannot teleport the runner through an obstacle.
+  static const double maxFrameDt = 0.05;
   static const double gravity = 38.0;
   static const double jumpImpulse = 12.0;
 
@@ -48,10 +60,14 @@ class _GamePageState extends State<GamePage>
   static const double wallAfter = 8.0; // seconds before walls start appearing
 
   // --- coins --------------------------------------------------------------
-  static const int coinCount = 24;
+  static const int coinCount = 36;
   static const double coinY = groundY + 0.35;
-  static const int coinsPerLine = 4;
+  static const int coinsPerLine = 6;
   static const double coinGap = 2.5;
+  static const double coinRadius = 0.32; // upright disc, not a flat card
+  // Arc height must stay under _collectsCoin's dy tolerance (1.8) or the peak
+  // of an arc becomes uncollectable while running on the ground.
+  static const double coinArcH = 0.85;
   static const double coinInterval = 1.7;
   static const int coinScore = 25;
 
@@ -88,6 +104,126 @@ class _GamePageState extends State<GamePage>
   static const int fogHex = 0xFF131A30; // tint the far road fades into
   static const double fogStart = 34.0; // world units from the camera
   static const double fogEnd = 62.0;
+
+  // --- daylight world (visual overhaul, Phase 1) --------------------------
+  // The neon params above stay for a future "night" theme; these drive the
+  // bright DashSurfers-style look: sun + shadows + grass + sky.
+  static const int cSkyTop = 0xFF5AAEF5; // sky blue (screen top)
+  static const int cSkyBot = 0xFFCDEBFF; // pale horizon
+  static const int cGrass = 0xFF5FB343; // grass field
+  static const int cAsphaltA = 0xFF3E444C; // road tile A
+  static const int cAsphaltB = 0xFF474E57; // road tile B
+  static const int cHedge = 0xFF4C9A3C; // roadside greenery (repurposed posts)
+  static const double groundHalfW = 40.0; // grass reach each side of the road
+  static const double groundLen = 280.0; // static grass length in z
+  // --- shadow + render budget ---------------------------------------------
+  // `DirectionalLight` defaults to FOUR cascades at 1024², and every shadow
+  // caster is re-drawn into each cascade its bounds touch — on top of the
+  // colour pass. With ~350 individually-noded meshes that multiplier is the
+  // single most expensive thing in the frame, and four cascades only pay off
+  // over a long view distance. We shadow 42 units of road with a camera that
+  // never moves, so two cascades cover it with no visible difference.
+  static const int shadowCascades = 2;
+  static const int shadowMapRes = 1024;
+  static const double shadowDistance = 42.0;
+
+  // Fragment-cost knob: renders below native resolution and upscales on
+  // composite. Independent of everything else, which makes it the safest lever
+  // when a device simply cannot keep up. See `_quality` / `qualityScales`.
+  static const List<double> qualityScales = <double>[1.0, 0.85, 0.7];
+  static const List<String> qualityNames = <String>['HIGH', 'BALANCED', 'FAST'];
+
+  static const double sunIntensity = 2.6; // softer key light (less harsh)
+  static const double envIntensity = 1.25; // strong ambient fill -> soft shadows
+  static const int cFogDay = 0xFFCDEBFF; // far road melts into the sky
+  static const double fogStartDay = 40.0;
+  static const double fogEndDay = 80.0;
+  static const int cTrunk = 0xFF7A5233; // tree trunk
+  static const int cPine = 0xFF2F7D44; // pine foliage
+  static const int cLeaf = 0xFF5CB248; // round-tree foliage
+  static const double treeX = roadWidth / 2 + 2.3; // trees sit out on the grass
+  static const int houseCount = 5;
+  static const double houseSpacing = totalLen / houseCount;
+  static const double houseX = roadWidth / 2 + 8.0; // houses sit behind the trees
+  static const int cWall = 0xFFEBE0CC; // house walls (cream)
+  static const int cDoor = 0xFF6E4A2C; // house door
+  static const int cWindow = 0xFF9BD6EC; // house window
+  static const int cRock = 0xFF8C9198; // scattered rocks
+  static const int cBush = 0xFF52A63C; // scattered bushes
+  static const int decoCount = 40; // instanced rocks / bushes per type
+  static const int cLeafB = 0xFF7BBF3A; // yellow-green foliage
+  static const int cAutumn = 0xFFD1662E; // autumn foliage
+  static const int cFlowerA = 0xFFB760D9; // purple flowers
+  static const int cFlowerB = 0xFFEC5C79; // pink flowers
+  // Raised from 240 toward the reference's carpet. Instancing is real hardware
+  // instancing here (see CLAUDE.md), so the whole shade is 1-2 draw calls no
+  // matter the count — raising this costs vertex/fragment work and overdraw,
+  // not draw calls.
+  static const int grassCount = 320; // instanced grass tufts per shade (dense)
+  static const int cGrassA = 0xFF69B84A; // grass tuft (soft green)
+  static const int cGrassB = 0xFF8AD05C; // grass tuft (light green)
+  static const int cGrassC = 0xFF57A33F; // grass tuft (deep green)
+
+  // --- road markings + shoulder (target-reference pass) -------------------
+  // The reference road is read by its markings, not its colour: white dashed
+  // dividers, a solid white line on each edge, and a packed-dirt shoulder
+  // between asphalt and grass. Edge lines and shoulder never scroll (a solid
+  // line has no phase), so they are static geometry placed once.
+  static const int cLaneLine = 0xFFF4F2EA; // dashes + edge lines
+  static const double edgeLineX = roadWidth / 2 - 0.22;
+  static const double shoulderW = 1.0;
+  static const double shoulderX = roadWidth / 2 + shoulderW / 2;
+  static const int cShoulder = 0xFF8A7355; // packed dirt
+
+  // --- distant hills ------------------------------------------------------
+  // Big static mounds parked just inside the fog's far end, so they arrive as
+  // hazy silhouettes on the horizon rather than as readable geometry. They do
+  // not scroll — like real distant terrain, parallax at this range is nil.
+  static const int hillCount = 6;
+  static const int cHill = 0xFF4E9A3E;
+
+  // --- guardrails ---------------------------------------------------------
+  static const int railCount = 30; // beam segments per side
+  static const int railPostCount = railCount ~/ 2; // a post every other beam
+  static const double railSpacing = totalLen / railCount;
+  static const double railX = roadWidth / 2 + 0.62;
+  // Beam spans roadTopY+0.37..+0.67; the posts top out at +0.66, so the beam
+  // reads as carried by them rather than floating above.
+  static const double railY = roadTopY + 0.52;
+  static const int cRail = 0xFFB9C4CE; // galvanised steel
+  static const int cRailPost = 0xFF8A939B;
+
+  // --- roadside sign posts ------------------------------------------------
+  static const int signCount = 8; // per side
+  static const double signSpacing = totalLen / signCount;
+  static const double signX = roadWidth / 2 + 1.45;
+  static const int cSignPole = 0xFFEDEDE8;
+  static const int cSignBoard = 0xFFD6DBE0;
+
+  // --- jump ramps ---------------------------------------------------------
+  // Purely additive: a ramp launches the runner, it never blocks. That keeps
+  // it safe to tune without making the run unfair.
+  static const int rampCount = 2;
+  static const double rampFirstDelay = 12.0;
+  static const double rampInterval = 11.0;
+  static const double rampImpulse = 15.5; // vs jumpImpulse 12
+  static const double rampHalfZ = 1.5;
+  static const int cRamp = 0xFF3F8FD8;
+  static const int cRampEdge = 0xFF2B6DA6;
+
+  // --- obstacle variety (DashSurfers pass) --------------------------------
+  // Pooled obstacles are a mix of these three shapes; each is a composite node
+  // built base-at-origin and positioned on the road surface (roadTopY) in the
+  // painter. Collision stays a uniform AABB (obHalf*), so shapes read fairly.
+  static const int cGiftA = 0xFFE0533D; // red present
+  static const int cGiftB = 0xFFF2B33D; // gold present
+  static const int cRibbon = 0xFFF7F3EA; // ribbon + bow (cream)
+  static const int cBarrierA = 0xFFD84B3A; // barrier stripe (red)
+  static const int cBarrierB = 0xFFF2ECDE; // barrier stripe (cream)
+  static const int cBarrierLeg = 0xFF5A5F66; // barrier legs (grey)
+  static const int cContainer = 0xFF3F8F57; // shipping container (green)
+  static const int cContainerB = 0xFF2E6B41; // container trim + ribs (dark)
+  static const int cContainerR = 0xFFB2543A; // rust container variant
 
   // --- power-ups (Improvement 6) ------------------------------------------
   static const int powerupCount = 3; // pooled orbs (rarely >1 on screen)
@@ -137,15 +273,46 @@ class _GamePageState extends State<GamePage>
   final TextEditingController _nameCtrl = TextEditingController();
   final FocusNode _nameFocus = FocusNode();
 
-  double get _curSpeed =>
-      math.min(maxSpeed, baseSpeed + _elapsed * speedRampPerSec);
+  double get _curSpeed => gm.speedAt(_elapsed,
+      base: baseSpeed, max: maxSpeed, rampPerSec: speedRampPerSec);
 
   // --- nodes --------------------------------------------------------------
-  final List<Node> _tiles = <Node>[];
-  final List<Node> _postsL = <Node>[];
+  // Road surface is instanced: two sets for the alternating asphalt tones
+  // (one material per set — instancing shares a material across the batch)
+  // and one set covering both lane dividers. 54 draw calls become 3.
+  InstancedMesh? _tilesA;
+  InstancedMesh? _tilesB;
+  InstancedMesh? _dashes;
+  final List<Node> _postsL = <Node>[]; // roadside trees
   final List<Node> _postsR = <Node>[];
-  final List<Node> _dashesL = <Node>[];
-  final List<Node> _dashesR = <Node>[];
+  final List<Node> _housesL = <Node>[]; // background houses
+  final List<Node> _housesR = <Node>[];
+  // Instanced scenery: many rocks/bushes drawn in ONE call each. Per-instance
+  // data is (x, phaseZ, scale); the painter scrolls them via setInstanceTransform.
+  InstancedMesh? _rocks;
+  InstancedMesh? _bushes;
+  final List<vm.Vector3> _rockData = <vm.Vector3>[];
+  final List<vm.Vector3> _bushData = <vm.Vector3>[];
+  InstancedMesh? _flowersA;
+  InstancedMesh? _flowersB;
+  final List<vm.Vector3> _flowerAData = <vm.Vector3>[];
+  final List<vm.Vector3> _flowerBData = <vm.Vector3>[];
+  // Tall grass tufts carpeting the roadside — instanced (x, phaseZ, scale, yaw).
+  InstancedMesh? _grassA;
+  InstancedMesh? _grassB;
+  InstancedMesh? _grassC;
+  final List<vm.Vector4> _grassAData = <vm.Vector4>[];
+  final List<vm.Vector4> _grassBData = <vm.Vector4>[];
+  final List<vm.Vector4> _grassCData = <vm.Vector4>[];
+  // Guardrails and sign posts sit on a fixed spacing, so unlike the scattered
+  // scenery they need no per-instance data at all — the painter derives side
+  // and z from the instance index. Instances 0..n-1 are the left side, n..2n-1
+  // the right.
+  InstancedMesh? _rails;
+  InstancedMesh? _railPosts;
+  InstancedMesh? _signPoles;
+  InstancedMesh? _signBoards;
+  final List<_Ramp> _ramps = <_Ramp>[];
   final List<_Obstacle> _obstacles = <_Obstacle>[];
   final List<_Coin> _coins = <_Coin>[];
   final List<_PowerUp> _powerups = <_PowerUp>[];
@@ -162,7 +329,13 @@ class _GamePageState extends State<GamePage>
   double _wIdle = 1;
   double _wJump = 0;
 
+  // Smoothed frame rate, shown in the HUD. Instancing does not batch draw
+  // calls at flutter_scene 0.19.0, so density changes have to be measured
+  // rather than assumed — this is the readout for that.
+  double _fps = 60;
+
   // power-up run state
+  double _rampSpawnTimer = rampFirstDelay;
   double _powerSpawnTimer = powerFirstDelay;
   double _magnetT = 0; // seconds of magnet remaining
   double _doubleT = 0; // seconds of ×2 remaining
@@ -173,7 +346,16 @@ class _GamePageState extends State<GamePage>
   static const List<double> volumes = <double>[0.0, 0.45, 0.9];
   int _volLevel = 2; // index into volumes; 0 = muted
 
-  static double _laneX(int lane) => -lane * laneWidth;
+  // Render-resolution preset; index into qualityScales/qualityNames. Persisted
+  // like volume, because it is a device capability choice, not a run setting.
+  int _quality = 0;
+
+  // floating "+N" score popups (screen space, projected via the last camera)
+  Camera? _lastCamera;
+  Size _lastViewport = Size.zero;
+  final List<_Popup> _popups = <_Popup>[];
+
+  static double _laneX(int lane) => gm.laneX(lane, laneWidth);
 
   @override
   void initState() {
@@ -185,6 +367,7 @@ class _GamePageState extends State<GamePage>
     _loadScores();
     _audio.init();
     _loadVolume();
+    _loadQuality();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focus.requestFocus();
     });
@@ -195,11 +378,15 @@ class _GamePageState extends State<GamePage>
         ? 0
         : (elapsed - _last).inMicroseconds / Duration.microsecondsPerSecond;
     _last = elapsed;
-    if (dt > 0.05) dt = 0.05;
+    // Smooth the RAW dt: the clamp below would floor the readout at 20 fps and
+    // hide exactly the hitches worth seeing.
+    if (dt > 0) _fps += (1 / dt - _fps) * 0.06;
+    dt = gm.clampDt(dt, maxFrameDt);
     if (_shakeT > 0) _shakeT = math.max(0, _shakeT - dt);
     _updateParticles(dt);
     _update(dt);
     _updateDashAnim(dt);
+    _updatePopups(dt);
     _repaint.value++;
   }
 
@@ -224,7 +411,7 @@ class _GamePageState extends State<GamePage>
 
     _prevRunnerX = _runnerX;
     final double targetX = _laneX(_lane);
-    _runnerX += (targetX - _runnerX) * (1 - math.exp(-laneLerp * dt));
+    _runnerX += (targetX - _runnerX) * gm.smoothing(laneLerp, dt);
 
     if (!_grounded) {
       _jumpY += _jumpV * dt;
@@ -252,6 +439,31 @@ class _GamePageState extends State<GamePage>
     if (_powerSpawnTimer <= 0) {
       _spawnPowerUp();
       _powerSpawnTimer = powerInterval;
+    }
+
+    _rampSpawnTimer -= dt;
+    if (_rampSpawnTimer <= 0) {
+      _spawnRamp();
+      _rampSpawnTimer = rampInterval;
+    }
+
+    for (final _Ramp r in _ramps) {
+      if (!r.active) continue;
+      r.z += v * dt;
+      if (r.z > despawnZ) {
+        r.active = false;
+        continue;
+      }
+      // Additive only — a ramp never blocks. Overlapping one while grounded
+      // replaces the normal jump with a stronger launch.
+      if (_grounded &&
+          (_runnerX - _laneX(r.lane)).abs() < 1.0 &&
+          (runnerZ - r.z).abs() < rampHalfZ + runnerHalf) {
+        _grounded = false;
+        _jumpV = rampImpulse;
+        _clipJump?.replay();
+        _audio.jump();
+      }
     }
 
     for (final _Obstacle o in _obstacles) {
@@ -285,14 +497,16 @@ class _GamePageState extends State<GamePage>
       // Magnet: slide the coin's x toward the runner once it's within reach.
       final double targetX = (_magnetT > 0 && (c.z - runnerZ).abs() < magnetRange)
           ? _runnerX
-          : _laneX(c.lane);
-      c.cx += (targetX - c.cx) * (1 - math.exp(-magnetPull * dt));
+          : c.restX;
+      c.cx += (targetX - c.cx) * gm.smoothing(magnetPull, dt);
       if (_collectsCoin(c)) {
         c.active = false;
         _coinsCollected++;
         _score += coinScore * (_doubleT > 0 ? 2 : 1);
-        _spawnParticles(c.cx, coinY, c.z, 7, 0xFFFFC93C, 3.5, 3.0);
+        _spawnParticles(c.cx, c.y, c.z, 7, 0xFFFFC93C, 3.5, 3.0);
         _audio.coin();
+        _spawnPopup(
+            c.cx, c.y + 0.4, c.z, '+${coinScore * (_doubleT > 0 ? 2 : 1)}');
       }
     }
 
@@ -337,17 +551,52 @@ class _GamePageState extends State<GamePage>
     }
   }
 
+  /// Lays a run of coins in one of three shapes. The reference never uses a
+  /// flat straight line — coins arrive as **rising arcs** and **lane-to-lane
+  /// trails**, which is what makes them read as a path to follow rather than
+  /// as loose pickups.
   void _spawnCoinLine() {
+    final int pattern = _rng.nextInt(3);
     final int lane = _rng.nextInt(3) - 1;
+    // The trail slides toward a neighbouring lane; from the middle either way.
+    final int lane2 =
+        pattern == 2 ? (lane == 0 ? (_rng.nextBool() ? 1 : -1) : 0) : lane;
+    const int n = coinsPerLine;
     int placed = 0;
     for (final _Coin c in _coins) {
-      if (placed >= coinsPerLine) break;
-      if (!c.active) {
-        c.active = true;
-        c.lane = lane;
-        c.cx = _laneX(lane);
-        c.z = spawnZ - placed * coinGap;
-        placed++;
+      if (placed >= n) break;
+      if (c.active) continue;
+      final double f = n > 1 ? placed / (n - 1) : 0.0; // 0..1 along the run
+      c.active = true;
+      c.z = spawnZ - placed * coinGap;
+      switch (pattern) {
+        case 1: // rising arc, peaking mid-run
+          c.lane = lane;
+          c.y = coinY + math.sin(f * math.pi) * coinArcH;
+          c.restX = _laneX(lane);
+          break;
+        case 2: // trail drifting across to the next lane
+          c.lane = f < 0.5 ? lane : lane2;
+          c.y = coinY;
+          c.restX = _laneX(lane) + (_laneX(lane2) - _laneX(lane)) * f;
+          break;
+        default: // flat line
+          c.lane = lane;
+          c.y = coinY;
+          c.restX = _laneX(lane);
+      }
+      c.cx = c.restX;
+      placed++;
+    }
+  }
+
+  void _spawnRamp() {
+    for (final _Ramp r in _ramps) {
+      if (!r.active) {
+        r.active = true;
+        r.lane = _rng.nextInt(3) - 1;
+        r.z = spawnZ;
+        return;
       }
     }
   }
@@ -365,7 +614,7 @@ class _GamePageState extends State<GamePage>
   bool _collectsCoin(_Coin c) {
     final double runnerY = groundY + _jumpY;
     final double dx = (_runnerX - c.cx).abs();
-    final double dy = (runnerY - coinY).abs();
+    final double dy = (runnerY - c.y).abs();
     final double dz = (runnerZ - c.z).abs();
     return dx < 1.0 && dy < 1.8 && dz < 0.9;
   }
@@ -455,8 +704,41 @@ class _GamePageState extends State<GamePage>
     }
   }
 
+  /// 1-based position [s] would take on the board, or null if it wouldn't make
+  /// the top 5. `_scores` is kept sorted descending, so this counts entries
+  /// that already beat it.
+  int? _placeFor(int s) {
+    if (s <= 0) return null;
+    int place = 1;
+    for (final _Score e in _scores) {
+      if (s > e.score) break;
+      place++;
+    }
+    return place <= 5 ? place : null;
+  }
+
+  static String _ordinal(int n) => gm.ordinal(n);
+
   bool _isHighScore(int s) =>
       s > 0 && (_scores.length < 5 || s > _scores.last.score);
+
+  void _spawnPopup(double wx, double wy, double wz, String text) {
+    final Camera? cam = _lastCamera;
+    if (cam == null) return;
+    final Offset? o = cam.worldToScreen(vm.Vector3(wx, wy, wz), _lastViewport);
+    if (o == null) return;
+    _popups.add(_Popup(text, o.dx, o.dy));
+    if (_popups.length > 14) _popups.removeAt(0);
+  }
+
+  void _updatePopups(double dt) {
+    for (int i = _popups.length - 1; i >= 0; i--) {
+      final _Popup p = _popups[i];
+      p.age += dt;
+      p.y -= 46 * dt; // rise
+      if (p.age >= _Popup.life) _popups.removeAt(i);
+    }
+  }
 
   void _crash() {
     if (_phase != Phase.playing) return;
@@ -549,9 +831,13 @@ class _GamePageState extends State<GamePage>
     for (final _PowerUp p in _powerups) {
       p.active = false;
     }
+    for (final _Ramp r in _ramps) {
+      r.active = false;
+    }
     for (final _Particle p in _particles) {
       p.active = false;
     }
+    _rampSpawnTimer = rampFirstDelay;
     _powerSpawnTimer = powerFirstDelay;
     _magnetT = 0;
     _doubleT = 0;
@@ -645,45 +931,247 @@ class _GamePageState extends State<GamePage>
   }
 
   void _buildWorld() {
-    const int shadeA = 0xFF232A3A;
-    const int shadeB = 0xFF2E3750;
+    // Static ground: grass fields either side + a continuous road bed. They
+    // never move, so they're placed once here (not in paint()) and they catch
+    // the sun's shadows.
+    final Node grassL =
+        _litBox(vm.Vector3(groundHalfW, 0.4, groundLen), cGrass, rough: 1.0)
+          ..localTransform = vm.Matrix4.translationValues(
+              -(roadWidth / 2 + groundHalfW / 2), roadTopY - 0.2, -20);
+    final Node grassR =
+        _litBox(vm.Vector3(groundHalfW, 0.4, groundLen), cGrass, rough: 1.0)
+          ..localTransform = vm.Matrix4.translationValues(
+              roadWidth / 2 + groundHalfW / 2, roadTopY - 0.2, -20);
+    final Node roadBed =
+        _litBox(vm.Vector3(roadWidth + 0.1, 0.3, groundLen), cAsphaltB)
+          ..localTransform =
+              vm.Matrix4.translationValues(0, roadTopY - 0.26, -20);
+    // These never move, so their shadow-map contribution can be baked once
+    // instead of re-rendered every frame. `shadowStatic` is only safe because
+    // nothing below ever changes transform, geometry or material after build —
+    // a static node that *does* change keeps showing its stale shadow.
+    grassL.shadowStatic = true;
+    grassR.shadowStatic = true;
+    roadBed.shadowStatic = true;
+    _scene.add(grassL);
+    _scene.add(grassR);
+    _scene.add(roadBed);
+
+    // Packed-dirt shoulders + solid white edge lines. Both are continuous, so
+    // they have no phase to scroll — static geometry, placed once. Each sits a
+    // hair above roadTopY so it can't z-fight the road or the grass, which
+    // both top out exactly at roadTopY.
+    for (final double side in <double>[-1.0, 1.0]) {
+      _scene.add(_litBox(
+          vm.Vector3(shoulderW, 0.08, groundLen), cShoulder, rough: 1.0)
+        ..shadowStatic = true
+        ..localTransform = vm.Matrix4.translationValues(
+            side * shoulderX, roadTopY - 0.03, -20));
+      _scene.add(_litBox(vm.Vector3(0.16, 0.06, groundLen), cLaneLine)
+        ..shadowStatic = true
+        ..localTransform = vm.Matrix4.translationValues(
+            side * edgeLineX, roadTopY - 0.005, -20));
+    }
+
+    // Distant hills: parked just inside fogEndDay so they read as haze, and
+    // sunk below roadTopY so only the crowns break the horizon.
+    for (int i = 0; i < hillCount; i++) {
+      final double side = i.isEven ? -1.0 : 1.0;
+      // w and h are semi-axes of a unit icosphere, so the mound is 2w wide and
+      // rises 0.45h above the ground plane. hx must clear w by a wide margin
+      // or a "distant" hill ends up straddling the road.
+      final double w = 14.0 + _rng.nextDouble() * 10.0;
+      final double h = 6.0 + _rng.nextDouble() * 6.0;
+      final double hx = side * (38.0 + _rng.nextDouble() * 30.0);
+      // Inside fogEndDay (80 from the camera at camZ) so they read as haze
+      // rather than dissolving into the sky entirely.
+      final double hz = -40.0 - _rng.nextDouble() * 18.0;
+      // Built as a local: a cascade after `..localTransform = …` would bind to
+      // the Node, not to the matrix.
+      final vm.Matrix4 hm =
+          vm.Matrix4.translationValues(hx, roadTopY - h * 0.55, hz)
+            ..scaleByDouble(w, h, w * 0.7, 1.0);
+      _scene.add(Node(
+          mesh: Mesh(IcosphereGeometry(radius: 1.0, subdivisions: 2),
+              _matte(cHill)))
+        ..shadowStatic = true
+        ..localTransform = hm);
+    }
+
+    // Road tiles: 18 slabs in two alternating tones, instanced per tone.
+    _tilesA = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(roadWidth, 0.2, segLen * 0.96)),
+        material: _matte(cAsphaltA));
+    _tilesB = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(roadWidth, 0.2, segLen * 0.96)),
+        material: _matte(cAsphaltB));
     for (int i = 0; i < tileCount; i++) {
-      final Node node = _box(vm.Vector3(roadWidth, 0.2, segLen * 0.96),
-          colorHex: i.isEven ? shadeA : shadeB);
-      _tiles.add(node);
-      _scene.add(node);
+      (i.isEven ? _tilesA! : _tilesB!).addInstance(vm.Matrix4.identity());
     }
-    const int dashColor = 0xFFE7C24B;
-    for (int k = 0; k < dashCount; k++) {
-      final Node l = _box(vm.Vector3(0.14, 0.06, 1.4), colorHex: dashColor);
-      final Node r = _box(vm.Vector3(0.14, 0.06, 1.4), colorHex: dashColor);
-      _dashesL.add(l);
-      _dashesR.add(r);
-      _scene.add(l);
-      _scene.add(r);
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_tilesA!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_tilesB!)));
+
+    // Lane dividers: white and *lit*, not the old unlit gold. Lit means they
+    // take the same sun and distance fog as the road, so they fade with it
+    // instead of staying crisp all the way to the horizon. One instanced set
+    // covers both lines — [0, n) left, [n, 2n) right.
+    _dashes = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(0.16, 0.06, 1.5)),
+        material: _matte(cLaneLine));
+    for (int k = 0; k < dashCount * 2; k++) {
+      _dashes!.addInstance(vm.Matrix4.identity());
     }
-    const int postColor = 0xFF4FD1C5;
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_dashes!)));
     for (int j = 0; j < postCount; j++) {
-      final Node l =
-          _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor, glow: postGlow);
-      final Node r =
-          _box(vm.Vector3(0.3, 1.4, 0.3), colorHex: postColor, glow: postGlow);
+      final Node l = _tree(
+          pine: j.isEven,
+          scale: 1.15 + _rng.nextDouble() * 0.95,
+          foliage: _foliageColor(j.isEven));
+      final Node r = _tree(
+          pine: j.isOdd,
+          scale: 1.15 + _rng.nextDouble() * 0.95,
+          foliage: _foliageColor(j.isOdd));
       _postsL.add(l);
       _postsR.add(r);
       _scene.add(l);
       _scene.add(r);
     }
-    const int obstacleColor = 0xFFE0533D;
+    const List<int> roofHexes = <int>[
+      0xFFCF5140,
+      0xFF4E86C6,
+      0xFFE0973C,
+      0xFF5AA090,
+    ];
+    for (int i = 0; i < houseCount; i++) {
+      final Node l = _house(
+          roofHex: roofHexes[i % roofHexes.length],
+          scale: 1.1 + _rng.nextDouble() * 0.7);
+      final Node r = _house(
+          roofHex: roofHexes[(i + 2) % roofHexes.length],
+          scale: 1.1 + _rng.nextDouble() * 0.7);
+      _housesL.add(l);
+      _housesR.add(r);
+      _scene.add(l);
+      _scene.add(r);
+    }
+
+    _rocks = InstancedMesh(
+        geometry: IcosphereGeometry(radius: 0.5, subdivisions: 1),
+        material: _matte(cRock));
+    _bushes = InstancedMesh(
+        geometry: IcosphereGeometry(radius: 0.5, subdivisions: 1),
+        material: _matte(cBush));
+    _scatterDeco(_rocks!, _rockData, 0.35, 0.55);
+    _scatterDeco(_bushes!, _bushData, 0.5, 0.7);
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_rocks!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_bushes!)));
+
+    _flowersA = InstancedMesh(
+        geometry: IcosphereGeometry(radius: 0.5, subdivisions: 1),
+        material: _matte(cFlowerA));
+    _flowersB = InstancedMesh(
+        geometry: IcosphereGeometry(radius: 0.5, subdivisions: 1),
+        material: _matte(cFlowerB));
+    _scatterDeco(_flowersA!, _flowerAData, 0.12, 0.12);
+    _scatterDeco(_flowersB!, _flowerBData, 0.12, 0.12);
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_flowersA!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_flowersB!)));
+
+    // Tall grass tufts: slim tapered blades carpeting the roadside in three
+    // green shades, each drawn in a single instanced call and scrolled + yawed
+    // in the painter. High count + thin blades give a lush, fuzzy silhouette.
+    _grassA = InstancedMesh(
+        geometry: CylinderGeometry(
+            bottomRadius: 0.06, topRadius: 0.0, height: 0.62, radialSegments: 3),
+        material: _matte(cGrassA));
+    _grassB = InstancedMesh(
+        geometry: CylinderGeometry(
+            bottomRadius: 0.055, topRadius: 0.0, height: 0.5, radialSegments: 3),
+        material: _matte(cGrassB));
+    _grassC = InstancedMesh(
+        geometry: CylinderGeometry(
+            bottomRadius: 0.06, topRadius: 0.0, height: 0.72, radialSegments: 3),
+        material: _matte(cGrassC));
+    _scatterGrass(_grassA!, _grassAData);
+    _scatterGrass(_grassB!, _grassBData);
+    _scatterGrass(_grassC!, _grassCData);
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_grassA!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_grassB!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_grassC!)));
+
+    // Guardrails: a beam run on both shoulders with a post every other beam.
+    // Fixed spacing means these need no scatter data at all — the painter maps
+    // instance index -> side + z. Instances [0, n) are the left side, [n, 2n)
+    // the right.
+    _rails = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(0.07, 0.3, railSpacing * 0.92)),
+        material: _matte(cRail));
+    _railPosts = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(0.09, 0.66, 0.09)),
+        material: _matte(cRailPost));
+    for (int i = 0; i < railCount * 2; i++) {
+      _rails!.addInstance(vm.Matrix4.identity());
+    }
+    for (int i = 0; i < railPostCount * 2; i++) {
+      _railPosts!.addInstance(vm.Matrix4.identity());
+    }
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_rails!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_railPosts!)));
+
+    // Roadside sign posts: a slim pole carrying a board near the top.
+    _signPoles = InstancedMesh(
+        geometry: CylinderGeometry(
+            bottomRadius: 0.05,
+            topRadius: 0.05,
+            height: 2.0,
+            radialSegments: 6),
+        material: _matte(cSignPole));
+    _signBoards = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(0.62, 0.44, 0.05)),
+        material: _matte(cSignBoard));
+    for (int i = 0; i < signCount * 2; i++) {
+      _signPoles!.addInstance(vm.Matrix4.identity());
+      _signBoards!.addInstance(vm.Matrix4.identity());
+    }
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_signPoles!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_signBoards!)));
+
+    for (int i = 0; i < rampCount; i++) {
+      final Node n = _rampNode();
+      _ramps.add(_Ramp(n));
+      _scene.add(n);
+    }
+
+    // Pooled obstacles: a repeating mix of gift box / candy barrier / green
+    // container so the road never shows a plain cube. Kind is fixed per slot
+    // (built once), which is enough variety with 10 slots recycling.
     for (int i = 0; i < obstacleCount; i++) {
-      final Node n = _box(vm.Vector3(obHalfX * 2, obHalfY * 2, obHalfZ * 2),
-          colorHex: obstacleColor, glow: obstacleGlow);
+      final int kind = i % 3;
+      final Node n = kind == 0
+          ? _giftBox(boxHex: i.isEven ? cGiftA : cGiftB)
+          : kind == 1
+              ? _barrier()
+              : _container(bodyHex: i.isEven ? cContainer : cContainerR);
       _obstacles.add(_Obstacle(n));
       _scene.add(n);
     }
+    // Coins are upright discs (a cylinder stood on edge by the painter), not
+    // flat cards — that is what gives the reference its edge-on/face-on flash
+    // as they spin.
     const int coinColor = 0xFFFFC93C;
     for (int i = 0; i < coinCount; i++) {
-      final Node n =
-          _box(vm.Vector3(0.5, 0.5, 0.12), colorHex: coinColor, glow: coinGlow);
+      final PhysicallyBasedMaterial cm = PhysicallyBasedMaterial()
+        ..baseColorFactor = _linearFromHex(coinColor)
+        ..roughnessFactor = 0.3
+        ..metallicFactor = 1.0;
+      final Node n = Node(
+          mesh: Mesh(
+              CylinderGeometry(
+                  bottomRadius: coinRadius,
+                  topRadius: coinRadius,
+                  height: 0.1,
+                  radialSegments: 14),
+              cm));
       _coins.add(_Coin(n));
       _scene.add(n);
     }
@@ -709,35 +1197,44 @@ class _GamePageState extends State<GamePage>
     _scene.add(_runner);
   }
 
-  /// One-time scene look: distance fog (far objects dissolve into the
-  /// background instead of popping in), neon bloom on the boosted accents, a
-  /// gentle grade, and a soft vignette. Tone mapping (pbrNeutral) and exposure
-  /// (1.0) keep their defaults, which already suit the imported Dash.
+  /// One-time daylight scene setup: a shadow-casting sun + soft ambient so PBR
+  /// surfaces are lit and Dash drops a real shadow, sky-colored distance haze
+  /// so the far road melts into the horizon, and just a touch of bloom + grade.
   void _setupSceneLook() {
-    final vm.Vector4 f = _linearFromHex(fogHex);
+    _scene.root.addComponent(
+      DirectionalLightComponent(
+        DirectionalLight(
+          direction: vm.Vector3(-0.5, -1.0, -0.42),
+          intensity: sunIntensity,
+          castsShadow: true,
+          // The two overrides below are the point: leaving cascade count at
+          // its default of 4 quadruples the shadow pass for a view distance
+          // we never use.
+          shadowCascadeCount: shadowCascades,
+          shadowMapResolution: shadowMapRes,
+          shadowMaxDistance: shadowDistance,
+        ),
+      ),
+    );
+    _scene.environmentIntensity = envIntensity;
+
+    final vm.Vector4 f = _linearFromHex(cFogDay);
     _scene.fog
       ..enabled = true
       ..mode = FogMode.linear
       ..color = vm.Vector3(f.r, f.g, f.b)
-      ..start = fogStart
-      ..end = fogEnd;
+      ..start = fogStartDay
+      ..end = fogEndDay;
 
     _scene.postProcess.bloom
       ..enabled = true
-      ..threshold = bloomThreshold
-      ..intensity = bloomIntensity
-      ..scatter = bloomScatter;
-
+      ..threshold = 1.1
+      ..intensity = 0.28
+      ..scatter = 0.6;
     _scene.postProcess.colorGrading
       ..enabled = true
-      ..contrast = 1.06
-      ..saturation = 1.14;
-
-    _scene.postProcess.vignette
-      ..enabled = true
-      ..intensity = vignetteIntensity
-      ..radius = 0.82
-      ..smoothness = 0.5;
+      ..contrast = 1.0 // softer, less crushed shadows
+      ..saturation = 1.12;
   }
 
   /// Imports the Dash model at runtime and wires up its locomotion clips.
@@ -799,7 +1296,7 @@ class _GamePageState extends State<GamePage>
     final double idleT = playing ? 0.0 : 1.0;
     final double jumpT = (playing && !_grounded) ? 1.0 : 0.0;
     final double runT = (playing && _grounded) ? 1.0 : 0.0;
-    final double k = dt <= 0 ? 1.0 : (1 - math.exp(-dashAnimBlend * dt));
+    final double k = dt <= 0 ? 1.0 : gm.smoothing(dashAnimBlend, dt);
     _wIdle += (idleT - _wIdle) * k;
     _wRun += (runT - _wRun) * k;
     _wJump += (jumpT - _wJump) * k;
@@ -816,6 +1313,291 @@ class _GamePageState extends State<GamePage>
       material.baseColorFactor = _glowFromHex(colorHex, glow);
     }
     return Node(mesh: Mesh(CuboidGeometry(size, debugColors: debug), material));
+  }
+
+  /// A lit PBR box — responds to the sun and casts/receives shadows. Used for
+  /// the daylight world (road, grass, obstacles, coins) instead of [_box].
+  Node _litBox(vm.Vector3 size, int colorHex,
+      {double rough = 0.9, double metal = 0.0}) {
+    final PhysicallyBasedMaterial material = PhysicallyBasedMaterial()
+      ..baseColorFactor = _linearFromHex(colorHex)
+      ..roughnessFactor = rough
+      ..metallicFactor = metal;
+    return Node(mesh: Mesh(CuboidGeometry(size), material));
+  }
+
+  PhysicallyBasedMaterial _matte(int colorHex) => PhysicallyBasedMaterial()
+    ..baseColorFactor = _linearFromHex(colorHex)
+    ..roughnessFactor = 1.0;
+
+  /// Picks a foliage tint: pines stay green-ish; round trees occasionally go
+  /// autumn for variety.
+  int _foliageColor(bool pine) {
+    final int r = _rng.nextInt(10);
+    if (pine) return r < 7 ? cPine : cLeafB;
+    if (r < 5) return cLeaf;
+    if (r < 7) return cLeafB;
+    if (r < 8) return cPine;
+    return cAutumn;
+  }
+
+  /// A low-poly tree: a trunk cylinder plus cone (pine) or sphere (round)
+  /// foliage, under a `body` scale node so the painter can still drive the
+  /// root's position each frame. The base sits at the root origin (y = 0).
+  Node _tree({required bool pine, required double scale, required int foliage}) {
+    final Node root = Node();
+    final Node body = Node()
+      ..localTransform = vm.Matrix4.diagonal3Values(scale, scale, scale);
+    root.add(body);
+
+    const double trunkH = 0.7;
+    body.add(Node(
+        mesh: Mesh(
+            CylinderGeometry(
+                bottomRadius: 0.13,
+                topRadius: 0.11,
+                height: trunkH,
+                radialSegments: 8),
+            _matte(cTrunk)))
+      ..localTransform = vm.Matrix4.translationValues(0, trunkH / 2, 0));
+
+    if (pine) {
+      // Three stacked cones -> a full, layered conifer (smoother radial count).
+      const double h1 = 1.2, h2 = 0.95, h3 = 0.72;
+      body.add(Node(
+          mesh: Mesh(
+              CylinderGeometry(
+                  bottomRadius: 0.82,
+                  topRadius: 0.0,
+                  height: h1,
+                  radialSegments: 12),
+              _matte(foliage)))
+        ..localTransform =
+            vm.Matrix4.translationValues(0, trunkH + h1 / 2 - 0.15, 0));
+      body.add(Node(
+          mesh: Mesh(
+              CylinderGeometry(
+                  bottomRadius: 0.6,
+                  topRadius: 0.0,
+                  height: h2,
+                  radialSegments: 12),
+              _matte(foliage)))
+        ..localTransform =
+            vm.Matrix4.translationValues(0, trunkH + h1 + h2 / 2 - 0.55, 0));
+      body.add(Node(
+          mesh: Mesh(
+              CylinderGeometry(
+                  bottomRadius: 0.4,
+                  topRadius: 0.0,
+                  height: h3,
+                  radialSegments: 12),
+              _matte(foliage)))
+        ..localTransform = vm.Matrix4.translationValues(
+            0, trunkH + h1 + h2 + h3 / 2 - 0.95, 0));
+    } else {
+      // A center sphere plus a few overlapping blobs -> a rounded, leafy crown.
+      const double cy = trunkH + 0.62;
+      body.add(Node(
+          mesh: Mesh(IcosphereGeometry(radius: 0.64, subdivisions: 2),
+              _matte(foliage)))
+        ..localTransform = vm.Matrix4.translationValues(0, cy, 0));
+      const List<List<double>> blobs = <List<double>>[
+        <double>[0.4, 0.04, 0.12, 0.42],
+        <double>[-0.36, 0.0, -0.14, 0.42],
+        <double>[0.05, 0.4, -0.05, 0.4],
+      ];
+      for (final List<double> b in blobs) {
+        body.add(Node(
+            mesh: Mesh(IcosphereGeometry(radius: b[3], subdivisions: 2),
+                _matte(foliage)))
+          ..localTransform =
+              vm.Matrix4.translationValues(b[0], cy + b[1], b[2]));
+      }
+    }
+    return root;
+  }
+
+  /// A low-poly house: box walls + a 4-sided pyramid roof (a cone with 4
+  /// radial segments), under a `body` scale node. Base at the root origin.
+  Node _house({required int roofHex, required double scale}) {
+    final Node root = Node();
+    final Node body = Node()
+      ..localTransform = vm.Matrix4.diagonal3Values(scale, scale, scale);
+    root.add(body);
+
+    const double wallH = 1.1, wallW = 1.5, wallD = 1.5;
+    body.add(Node(
+        mesh: Mesh(
+            CuboidGeometry(vm.Vector3(wallW, wallH, wallD)), _matte(cWall)))
+      ..localTransform = vm.Matrix4.translationValues(0, wallH / 2, 0));
+
+    final vm.Matrix4 roofT = vm.Matrix4.translationValues(0, wallH + 0.45, 0)
+      ..rotateY(0.7853981633974483); // 45° so the pyramid faces line up
+    body.add(Node(
+        mesh: Mesh(
+            CylinderGeometry(
+                bottomRadius: 1.15,
+                topRadius: 0.0,
+                height: 0.9,
+                radialSegments: 4),
+            _matte(roofHex)))
+      ..localTransform = roofT);
+
+    // door + window on the front (+z) wall
+    body.add(Node(
+        mesh: Mesh(CuboidGeometry(vm.Vector3(0.34, 0.55, 0.06)), _matte(cDoor)))
+      ..localTransform =
+          vm.Matrix4.translationValues(-0.32, 0.275, wallD / 2 + 0.02));
+    body.add(Node(
+        mesh: Mesh(
+            CuboidGeometry(vm.Vector3(0.32, 0.32, 0.06)), _matte(cWindow)))
+      ..localTransform =
+          vm.Matrix4.translationValues(0.34, 0.62, wallD / 2 + 0.02));
+    return root;
+  }
+
+  // --- obstacle shapes (base at origin; painter places them at roadTopY) ----
+
+  /// A wrapped present: a coloured cube crossed by two cream ribbons with a
+  /// little bow on top.
+  Node _giftBox({required int boxHex}) {
+    final Node root = Node();
+    const double s = 0.92; // body edge
+    const double half = s / 2;
+    root.add(Node(mesh: Mesh(CuboidGeometry(vm.Vector3(s, s, s)), _matte(boxHex)))
+      ..localTransform = vm.Matrix4.translationValues(0, half, 0));
+    // two ribbons wrapping the box (a "+" seen from the top / front)
+    root.add(Node(
+        mesh: Mesh(
+            CuboidGeometry(vm.Vector3(0.18, s + 0.04, s + 0.04)),
+            _matte(cRibbon)))
+      ..localTransform = vm.Matrix4.translationValues(0, half, 0));
+    root.add(Node(
+        mesh: Mesh(
+            CuboidGeometry(vm.Vector3(s + 0.04, s + 0.04, 0.18)),
+            _matte(cRibbon)))
+      ..localTransform = vm.Matrix4.translationValues(0, half, 0));
+    // bow: a knot plus two angled loops
+    root.add(Node(
+        mesh: Mesh(
+            IcosphereGeometry(radius: 0.1, subdivisions: 1), _matte(cRibbon)))
+      ..localTransform = vm.Matrix4.translationValues(0, s + 0.05, 0));
+    for (final double dir in <double>[-1.0, 1.0]) {
+      final vm.Matrix4 m = vm.Matrix4.translationValues(dir * 0.16, s + 0.05, 0)
+        ..rotateZ(dir * 0.6);
+      root.add(Node(
+          mesh: Mesh(
+              CuboidGeometry(vm.Vector3(0.24, 0.12, 0.1)), _matte(cRibbon)))
+        ..localTransform = m);
+    }
+    return root;
+  }
+
+  /// A candy-stripe road barricade: two grey legs carrying a striped crossbar
+  /// plus a solid lower board so it fills the collision box fairly.
+  Node _barrier() {
+    final Node root = Node();
+    for (final double dx in <double>[-0.5, 0.5]) {
+      root.add(Node(
+          mesh: Mesh(
+              CuboidGeometry(vm.Vector3(0.1, 0.92, 0.1)), _matte(cBarrierLeg)))
+        ..localTransform = vm.Matrix4.translationValues(dx, 0.46, 0));
+    }
+    // solid lower board (red)
+    root.add(Node(
+        mesh: Mesh(
+            CuboidGeometry(vm.Vector3(1.12, 0.3, 0.14)), _matte(cBarrierA)))
+      ..localTransform = vm.Matrix4.translationValues(0, 0.32, 0));
+    // striped top rail
+    for (int i = 0; i < 5; i++) {
+      root.add(Node(
+          mesh: Mesh(CuboidGeometry(vm.Vector3(0.224, 0.26, 0.16)),
+              _matte(i.isEven ? cBarrierA : cBarrierB)))
+        ..localTransform =
+            vm.Matrix4.translationValues(-0.448 + i * 0.224, 0.74, 0));
+    }
+    return root;
+  }
+
+  /// A green shipping container: a body with darker top/bottom trim and a few
+  /// vertical corrugation ribs on the front face the player sees.
+  Node _container({required int bodyHex}) {
+    final Node root = Node();
+    const double w = 1.16, h = 0.96, d = 0.96;
+    root.add(Node(
+        mesh: Mesh(CuboidGeometry(vm.Vector3(w, h, d)), _matte(bodyHex)))
+      ..localTransform = vm.Matrix4.translationValues(0, h / 2, 0));
+    for (final double ty in <double>[0.07, h - 0.07]) {
+      root.add(Node(
+          mesh: Mesh(CuboidGeometry(vm.Vector3(w + 0.04, 0.12, d + 0.04)),
+              _matte(cContainerB)))
+        ..localTransform = vm.Matrix4.translationValues(0, ty, 0));
+    }
+    for (int i = 0; i < 5; i++) {
+      root.add(Node(
+          mesh: Mesh(CuboidGeometry(vm.Vector3(0.06, h - 0.28, 0.03)),
+              _matte(cContainerB)))
+        ..localTransform = vm.Matrix4.translationValues(
+            -0.4 + i * 0.2, h / 2, d / 2 + 0.015));
+    }
+    return root;
+  }
+
+  /// A launch platform: a low blue slab with side rails and a darker sloped
+  /// lip on its **+z** face — objects travel from -z toward the camera, so the
+  /// +z end is the one the runner meets first. Base at origin.
+  Node _rampNode() {
+    final Node root = Node();
+    root.add(Node(
+        mesh: Mesh(CuboidGeometry(vm.Vector3(1.7, 0.18, rampHalfZ * 2)),
+            _matte(cRamp)))
+      ..localTransform = vm.Matrix4.translationValues(0, 0.09, 0));
+    final vm.Matrix4 lip =
+        vm.Matrix4.translationValues(0, 0.07, rampHalfZ + 0.18)
+          ..rotateX(0.42);
+    root.add(Node(
+        mesh:
+            Mesh(CuboidGeometry(vm.Vector3(1.7, 0.06, 0.5)), _matte(cRampEdge)))
+      ..localTransform = lip);
+    for (final double dx in <double>[-0.88, 0.88]) {
+      root.add(Node(
+          mesh: Mesh(CuboidGeometry(vm.Vector3(0.08, 0.26, rampHalfZ * 2)),
+              _matte(cRampEdge)))
+        ..localTransform = vm.Matrix4.translationValues(dx, 0.13, 0));
+    }
+    return root;
+  }
+
+  /// Seeds [decoCount] scattered instances into [mesh] (identity transforms,
+  /// scrolled each frame by the painter) and records their (x, phaseZ, scale).
+  void _scatterDeco(InstancedMesh mesh, List<vm.Vector3> data, double minScale,
+      double scaleRange) {
+    for (int i = 0; i < decoCount; i++) {
+      final double side = _rng.nextBool() ? 1.0 : -1.0;
+      final double x = side * (roadWidth / 2 + 1.6 + _rng.nextDouble() * 24);
+      final double phase = _rng.nextDouble() * totalLen;
+      final double sc = minScale + _rng.nextDouble() * scaleRange;
+      data.add(vm.Vector3(x, phase, sc));
+      mesh.addInstance(vm.Matrix4.identity());
+    }
+  }
+
+  /// Seeds [grassCount] grass tufts hugging the road edge outward, each with a
+  /// random yaw so the 3-sided blades face every way. Data is (x, phaseZ,
+  /// scale, yaw); the painter scrolls + rotates them each frame.
+  void _scatterGrass(InstancedMesh mesh, List<vm.Vector4> data) {
+    for (int i = 0; i < grassCount; i++) {
+      final double side = _rng.nextBool() ? 1.0 : -1.0;
+      // Starts just outside the dirt shoulder rather than at the asphalt, so
+      // the shoulder stays readable as its own band.
+      final double x =
+          side * (roadWidth / 2 + shoulderW + _rng.nextDouble() * 15);
+      final double phase = _rng.nextDouble() * totalLen;
+      final double sc = 0.7 + _rng.nextDouble() * 1.05;
+      final double yaw = _rng.nextDouble() * 6.283;
+      data.add(vm.Vector4(x, phase, sc, yaw));
+      mesh.addInstance(vm.Matrix4.identity());
+    }
   }
 
   @override
@@ -840,6 +1622,35 @@ class _GamePageState extends State<GamePage>
   }
 
   void _applyVolume() => _audio.volume = volumes[_volLevel];
+
+  /// Renders the 3D view below native resolution and upscales on composite.
+  /// The one performance lever that is independent of scene content, so it
+  /// still helps on a device the geometry budget alone cannot save.
+  void _applyQuality() => _scene.renderScale = qualityScales[_quality];
+
+  void _cycleQuality() {
+    setState(() => _quality = (_quality + 1) % qualityScales.length);
+    _applyQuality();
+    _focus.requestFocus();
+    _saveQuality();
+  }
+
+  Future<void> _loadQuality() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      final int q = prefs.getInt('quality.v1') ?? 0;
+      if (!mounted) return;
+      setState(() => _quality = q.clamp(0, qualityScales.length - 1));
+      _applyQuality();
+    } catch (_) {}
+  }
+
+  Future<void> _saveQuality() async {
+    try {
+      final SharedPreferences prefs = await SharedPreferences.getInstance();
+      await prefs.setInt('quality.v1', _quality);
+    } catch (_) {}
+  }
 
   void _cycleVolume() {
     setState(() => _volLevel = (_volLevel + 1) % volumes.length);
@@ -889,8 +1700,20 @@ class _GamePageState extends State<GamePage>
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: <Color>[Color(0xFF1B2340), Color(0xFF0B0E18)],
+                      colors: <Color>[Color(cSkyTop), Color(cSkyBot)],
                     ),
+                  ),
+                ),
+              ),
+              // Clouds ride between the sky gradient and the 3D layer. They
+              // are deliberately NOT geometry: at fogEndDay everything real
+              // dissolves into cSkyBot, so a 3D cloud would simply vanish.
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ValueListenableBuilder<int>(
+                    valueListenable: _repaint,
+                    builder: (BuildContext context, int tick, Widget? child) =>
+                        CustomPaint(painter: _CloudPainter(_elapsed)),
                   ),
                 ),
               ),
@@ -905,6 +1728,28 @@ class _GamePageState extends State<GamePage>
                 child: Text(
                   'flutter-scene-runner',
                   style: TextStyle(color: Colors.white38, fontSize: 13),
+                ),
+              ),
+              Positioned(
+                right: 8,
+                top: 44,
+                child: TextButton(
+                  onPressed: _cycleQuality,
+                  style: TextButton.styleFrom(
+                    minimumSize: Size.zero,
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  child: Text(
+                    qualityNames[_quality],
+                    style: const TextStyle(
+                      color: Colors.white38,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1,
+                    ),
+                  ),
                 ),
               ),
               Positioned(
@@ -924,6 +1769,7 @@ class _GamePageState extends State<GamePage>
                   ),
                 ),
               ),
+              _popupLayer(),
               if (_phase == Phase.playing) _hud(),
               if (_phase == Phase.playing)
                 const Positioned(
@@ -944,6 +1790,68 @@ class _GamePageState extends State<GamePage>
     );
   }
 
+  Widget _popupLayer() {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: ValueListenableBuilder<int>(
+          valueListenable: _repaint,
+          builder: (BuildContext context, int _, Widget? __) {
+            return Stack(
+              children: <Widget>[
+                for (final _Popup p in _popups)
+                  Positioned(
+                    left: p.x - 32,
+                    top: p.y - 14,
+                    child: Opacity(
+                      opacity: (1 - p.age / _Popup.life).clamp(0.0, 1.0),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          Container(
+                            width: 13,
+                            height: 13,
+                            decoration: BoxDecoration(
+                              color: cGold,
+                              // Not `shape: BoxShape.circle` — flutter_scene
+                              // exports a BoxShape too, so the bare name is
+                              // ambiguous in this library (same trap as
+                              // Animation; see CLAUDE.md).
+                              borderRadius: BorderRadius.circular(7),
+                              border: Border.all(
+                                  color: Colors.black26, width: 1.5),
+                            ),
+                          ),
+                          const SizedBox(width: 5),
+                          Text(
+                            p.text,
+                            style: const TextStyle(
+                              color: cGold,
+                              fontSize: 27,
+                              fontWeight: FontWeight.w900,
+                              // Stacked shadows fake the dark outline the
+                              // reference popups have; Flutter text has no
+                              // stroke without a custom painter.
+                              shadows: <Shadow>[
+                                Shadow(color: Colors.black87, blurRadius: 2),
+                                Shadow(
+                                    color: Colors.black54,
+                                    blurRadius: 6,
+                                    offset: Offset(0, 2)),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _hud() {
     return Positioned(
       top: 12,
@@ -955,31 +1863,83 @@ class _GamePageState extends State<GamePage>
           builder: (BuildContext context, int _, Widget? __) {
             return Column(
               children: <Widget>[
-                Text(
-                  '${_score.round()}',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 42,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 1,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '●  $_coinsCollected      ${(_curSpeed * 5).round()} km/h',
-                  style: const TextStyle(
-                    color: cGold,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 4),
+                _scoreCapsule(),
+                const SizedBox(height: 6),
                 _bestLine(),
                 _powerChips(),
               ],
             );
           },
         ),
+      ),
+    );
+  }
+
+  /// The reference's signature HUD: one dark rounded capsule holding the score,
+  /// with coins, speed and the frame rate on a smaller line beneath it. Speed
+  /// is shown in m/s because `_curSpeed` already *is* world units per second —
+  /// the old km/h line multiplied it by an invented factor.
+  Widget _scoreCapsule() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(26, 8, 26, 9),
+      decoration: BoxDecoration(
+        color: const Color(0xE60E1A2B),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: cGold.withValues(alpha: 0.85), width: 2),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.28),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Text(
+            '${_score.round()}',
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 38,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 1,
+              height: 1.0,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                    color: cGold, borderRadius: BorderRadius.circular(5)),
+              ),
+              const SizedBox(width: 5),
+              Text('$_coinsCollected',
+                  style: const TextStyle(
+                      color: cGold,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700)),
+              const SizedBox(width: 12),
+              Text('${_curSpeed.round()} m/s',
+                  style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(width: 12),
+              // Density is a real draw-call budget here (see CLAUDE.md), so
+              // the frame rate is on screen rather than guessed at.
+              Text('${_fps.round()} fps',
+                  style: TextStyle(
+                      color: _fps < 45 ? cRed : Colors.white38,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1178,6 +2138,21 @@ class _GamePageState extends State<GamePage>
                 fontWeight: FontWeight.w600,
               ),
             ),
+            // The reference's crash screen tells you where you landed, not
+            // just that you qualified. Only shown before the name is saved —
+            // afterwards the score is already on the board and would count
+            // itself.
+            if (_enteringName && _placeFor(_score.round()) != null) ...<Widget>[
+              const SizedBox(height: 10),
+              Text(
+                'You got ${_ordinal(_placeFor(_score.round())!)} place!',
+                style: const TextStyle(
+                  color: cGold,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
             const SizedBox(height: 20),
             if (_enteringName) ..._nameEntry() else ..._crashButtons(),
           ],
@@ -1289,8 +2264,11 @@ class _GamePageState extends State<GamePage>
         padding: const EdgeInsets.symmetric(horizontal: 34, vertical: 14),
         textStyle: const TextStyle(
             fontSize: 17, fontWeight: FontWeight.w800, letterSpacing: 1),
+        // Pill, like the reference's START button. Colour stays brand teal
+        // rather than the reference blue — that is a brand call, not a
+        // look-and-feel one.
         shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(26)),
       ),
       child: Text(label),
     );
