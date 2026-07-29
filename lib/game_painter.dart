@@ -33,6 +33,18 @@ class _GamePainter extends CustomPainter {
   /// Shared scratch for instanced writes only — never assigned to a node.
   static final vm.Matrix4 _scratch = vm.Matrix4.identity();
 
+  /// Holds a composite prop's world transform while its parts are composed
+  /// onto it. Separate from [_scratch] because [_compose] writes the result
+  /// into [_scratch] and must not clobber the base between parts.
+  static final vm.Matrix4 _base = vm.Matrix4.identity();
+
+  /// Writes `_base * partLocal` into instance [index] of [mesh].
+  static void _compose(InstancedMesh mesh, int index, vm.Matrix4 partLocal) {
+    _scratch.setFrom(_base);
+    _scratch.multiply(partLocal);
+    mesh.setInstanceTransform(index, _scratch);
+  }
+
   /// Moves [node] to (x, y, z) without allocating.
   ///
   /// Assigning `localTransform` would store a new matrix and mark the node
@@ -101,13 +113,24 @@ class _GamePainter extends CustomPainter {
       _place(state._postsR[j], _GamePageState.treeX, _GamePageState.roadTopY, z);
     }
 
-    for (int j = 0; j < state._housesL.length; j++) {
-      final double z = wrapZ(
-          j * _GamePageState.houseSpacing + _GamePageState.houseSpacing / 2);
-      _place(
-          state._housesL[j], -_GamePageState.houseX, _GamePageState.roadTopY, z);
-      _place(
-          state._housesR[j], _GamePageState.houseX, _GamePageState.roadTopY, z);
+    // Houses are instanced per part, so each part's instance transform is
+    // `houseWorld * partLocal` — the composition the old root/body/parts node
+    // tree used to do for us. The roof lives in a per-colour mesh at a
+    // different slot, hence `_houseRoofSlot`.
+    final InstancedMesh? hWalls = state._houseWalls;
+    if (hWalls != null) {
+      final List<vm.Vector4> data = state._houseData;
+      for (int h = 0; h < data.length; h++) {
+        final vm.Vector4 d = data[h];
+        _base.setIdentity();
+        _base.setTranslationRaw(d.x, _GamePageState.roadTopY, wrapZ(d.y));
+        _base.scaleByDouble(d.z, d.z, d.z, 1.0);
+        _compose(hWalls, h, _GamePageState.kHouseWall);
+        _compose(state._houseDoors!, h, _GamePageState.kHouseDoor);
+        _compose(state._houseWindows!, h, _GamePageState.kHouseWindow);
+        _compose(state._houseRoofs[d.w.toInt()], state._houseRoofSlot[h],
+            _GamePageState.kHouseRoof);
+      }
     }
 
     // ---- scattered scenery (instanced, data-driven) -----------------------

@@ -161,6 +161,23 @@ class _GamePageState extends State<GamePage>
   static const int cWall = 0xFFEBE0CC; // house walls (cream)
   static const int cDoor = 0xFF6E4A2C; // house door
   static const int cWindow = 0xFF9BD6EC; // house window
+  static const List<int> roofHexes = <int>[
+    0xFFCF5140,
+    0xFF4E86C6,
+    0xFFE0973C,
+    0xFF5AA090,
+  ];
+  // Part-local transforms inside a house's own (already scaled) space. The
+  // painter composes `houseWorld * partLocal` each frame, which is what the
+  // old `root -> body(scale) -> parts` node tree did implicitly. Constant, so
+  // they are built once rather than per frame.
+  static final vm.Matrix4 kHouseWall = vm.Matrix4.translationValues(0, 0.55, 0);
+  static final vm.Matrix4 kHouseRoof =
+      vm.Matrix4.translationValues(0, 1.55, 0)..rotateY(0.7853981633974483);
+  static final vm.Matrix4 kHouseDoor =
+      vm.Matrix4.translationValues(-0.32, 0.275, 0.77);
+  static final vm.Matrix4 kHouseWindow =
+      vm.Matrix4.translationValues(0.34, 0.62, 0.77);
   static const int cRock = 0xFF8C9198; // scattered rocks
   static const int cBush = 0xFF52A63C; // scattered bushes
   static const int decoCount = 40; // instanced rocks / bushes per type
@@ -301,8 +318,17 @@ class _GamePageState extends State<GamePage>
   InstancedMesh? _coinMesh;
   final List<Node> _postsL = <Node>[]; // roadside trees
   final List<Node> _postsR = <Node>[];
-  final List<Node> _housesL = <Node>[]; // background houses
-  final List<Node> _housesR = <Node>[];
+  // Houses are instanced per part, and the roof additionally per colour —
+  // a batch binds one material, so four roof colours means four roof meshes.
+  // `_houseData` is (x, phaseZ, scale, roofIndex) per house; `_houseRoofSlot`
+  // is that house's instance index *inside its own roof mesh*, which is not
+  // the same as its index in `_houseData`.
+  InstancedMesh? _houseWalls;
+  InstancedMesh? _houseDoors;
+  InstancedMesh? _houseWindows;
+  final List<InstancedMesh> _houseRoofs = <InstancedMesh>[];
+  final List<vm.Vector4> _houseData = <vm.Vector4>[];
+  final List<int> _houseRoofSlot = <int>[];
   // Instanced scenery: many rocks/bushes drawn in ONE call each. Per-instance
   // data is (x, phaseZ, scale); the painter scrolls them via setInstanceTransform.
   InstancedMesh? _rocks;
@@ -1059,23 +1085,49 @@ class _GamePageState extends State<GamePage>
       _scene.add(l);
       _scene.add(r);
     }
-    const List<int> roofHexes = <int>[
-      0xFFCF5140,
-      0xFF4E86C6,
-      0xFFE0973C,
-      0xFF5AA090,
-    ];
+    // Houses: box walls + a 4-sided pyramid roof (a cone with 4 radial
+    // segments), instanced per part. 40 draw calls become 7.
+    _houseWalls = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(1.5, 1.1, 1.5)),
+        material: _matte(cWall));
+    _houseDoors = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(0.34, 0.55, 0.06)),
+        material: _matte(cDoor));
+    _houseWindows = InstancedMesh(
+        geometry: CuboidGeometry(vm.Vector3(0.32, 0.32, 0.06)),
+        material: _matte(cWindow));
+    for (final int hex in roofHexes) {
+      _houseRoofs.add(InstancedMesh(
+          geometry: CylinderGeometry(
+              bottomRadius: 1.15,
+              topRadius: 0.0,
+              height: 0.9,
+              radialSegments: 4),
+          material: _matte(hex)));
+    }
     for (int i = 0; i < houseCount; i++) {
-      final Node l = _house(
-          roofHex: roofHexes[i % roofHexes.length],
-          scale: 1.1 + _rng.nextDouble() * 0.7);
-      final Node r = _house(
-          roofHex: roofHexes[(i + 2) % roofHexes.length],
-          scale: 1.1 + _rng.nextDouble() * 0.7);
-      _housesL.add(l);
-      _housesR.add(r);
-      _scene.add(l);
-      _scene.add(r);
+      for (int s = 0; s < 2; s++) {
+        final double side = s == 0 ? -1.0 : 1.0;
+        // Same offset the two sides had before, so they stay staggered.
+        final int roofIdx = (s == 0 ? i : i + 2) % roofHexes.length;
+        _houseData.add(vm.Vector4(
+          side * houseX,
+          i * houseSpacing + houseSpacing / 2,
+          1.1 + _rng.nextDouble() * 0.7,
+          roofIdx.toDouble(),
+        ));
+        _houseRoofSlot.add(_houseRoofs[roofIdx].instanceCount);
+        _houseRoofs[roofIdx].addInstance(vm.Matrix4.identity());
+        _houseWalls!.addInstance(vm.Matrix4.identity());
+        _houseDoors!.addInstance(vm.Matrix4.identity());
+        _houseWindows!.addInstance(vm.Matrix4.identity());
+      }
+    }
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_houseWalls!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_houseDoors!)));
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_houseWindows!)));
+    for (final InstancedMesh roof in _houseRoofs) {
+      _scene.add(Node()..addComponent(InstancedMeshComponent(roof)));
     }
 
     _rocks = InstancedMesh(
@@ -1440,45 +1492,6 @@ class _GamePageState extends State<GamePage>
               vm.Matrix4.translationValues(b[0], cy + b[1], b[2]));
       }
     }
-    return root;
-  }
-
-  /// A low-poly house: box walls + a 4-sided pyramid roof (a cone with 4
-  /// radial segments), under a `body` scale node. Base at the root origin.
-  Node _house({required int roofHex, required double scale}) {
-    final Node root = Node();
-    final Node body = Node()
-      ..localTransform = vm.Matrix4.diagonal3Values(scale, scale, scale);
-    root.add(body);
-
-    const double wallH = 1.1, wallW = 1.5, wallD = 1.5;
-    body.add(Node(
-        mesh: Mesh(
-            CuboidGeometry(vm.Vector3(wallW, wallH, wallD)), _matte(cWall)))
-      ..localTransform = vm.Matrix4.translationValues(0, wallH / 2, 0));
-
-    final vm.Matrix4 roofT = vm.Matrix4.translationValues(0, wallH + 0.45, 0)
-      ..rotateY(0.7853981633974483); // 45° so the pyramid faces line up
-    body.add(Node(
-        mesh: Mesh(
-            CylinderGeometry(
-                bottomRadius: 1.15,
-                topRadius: 0.0,
-                height: 0.9,
-                radialSegments: 4),
-            _matte(roofHex)))
-      ..localTransform = roofT);
-
-    // door + window on the front (+z) wall
-    body.add(Node(
-        mesh: Mesh(CuboidGeometry(vm.Vector3(0.34, 0.55, 0.06)), _matte(cDoor)))
-      ..localTransform =
-          vm.Matrix4.translationValues(-0.32, 0.275, wallD / 2 + 0.02));
-    body.add(Node(
-        mesh: Mesh(
-            CuboidGeometry(vm.Vector3(0.32, 0.32, 0.06)), _matte(cWindow)))
-      ..localTransform =
-          vm.Matrix4.translationValues(0.34, 0.62, wallD / 2 + 0.02));
     return root;
   }
 
