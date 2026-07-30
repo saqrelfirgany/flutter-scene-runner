@@ -170,6 +170,7 @@ expected to be significant. None was:
 | `postProcess.bloom` + `colorGrading` both off | **0 fps** |
 | `flutter build web --wasm` (WasmGC instead of JS) | no clear difference — see the caveat below |
 | **Native macOS / Metal, release** | **~45 fps** — the same as web |
+| `flutter_scene` **0.20.0** | **0 fps**, and shadows regressed — see below |
 
 That native row is the one that closes the question. The frame is **not** limited by WebGL2 or by JS: Metal renders the same scene at the same rate. Whatever the remaining cost is, it is platform-independent, and no subsystem above accounts for more than ~10% of it.
 
@@ -189,9 +190,15 @@ What would actually move it, in order of expected return:
   buckets would cut items directly — and cost visual variety, which is the
   thing the whole target-reference pass exists to add. That is a real trade,
   not a free win.
-- **A newer `flutter_scene`.** We are pinned to 0.19.0 and several of its own
-  doc comments are already stale relative to its code, which suggests the
-  renderer is moving quickly.
+- ~~**A newer `flutter_scene`.**~~ **Tried: 0.20.0 buys nothing here.** It
+  builds and analyzes clean against our code (no API breakage, tests still
+  pass) and measures the same frame rate — but the dark self-shadowing patch
+  came back on the near road, so its cascade fitting differs from 0.19.0's.
+  Reverted. Read its changelog before trying again: the renderer speedups
+  ("large speedup for many-draw scenes on the web backend") landed in **0.19**,
+  which we already have. 0.20 is mostly the declarative API, physics
+  restructuring, particles and audio — none of which we use. If you do upgrade
+  for a feature, expect to re-tune `shadowCascades` / `shadowMapRes` first.
 - The reverted baked-scatter experiment is in git history rather than the tree.
   Don't re-derive it expecting a big win — it was measured at +2 fps.
 
