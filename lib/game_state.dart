@@ -164,6 +164,15 @@ class _GamePageState extends State<GamePage>
   static const double fogStartDay = 40.0;
   static const double fogEndDay = 80.0;
   static const int cTrunk = 0xFF7A5233; // tree trunk
+  // Tree part dimensions, shared by the builder and the painter's part-local
+  // matrices. Pine tiers are [bottomRadius, height], widest first.
+  static const double trunkH = 0.7;
+  static const List<List<double>> _pineTierDims = <List<double>>[
+    <double>[0.82, 1.2],
+    <double>[0.6, 0.95],
+    <double>[0.4, 0.72],
+  ];
+  static const List<double> _roundBlobRadii = <double>[0.64, 0.42, 0.40];
   static const int cPine = 0xFF2F7D44; // pine foliage
   static const int cLeaf = 0xFF5CB248; // round-tree foliage
   static const double treeX = roadWidth / 2 + 2.3; // trees sit out on the grass
@@ -328,8 +337,12 @@ class _GamePageState extends State<GamePage>
   // Pooled coins share one geometry and material, so they are instanced too;
   // a coin's index in `_coins` IS its instance index.
   InstancedMesh? _coinMesh;
-  final List<Node> _postsL = <Node>[]; // roadside trees
-  final List<Node> _postsR = <Node>[];
+  // Roadside trees. All 18 are on screen at all times, which made them the
+  // single largest fixed draw-call cost (4 meshes each = 72). Instanced per
+  // (part geometry, foliage colour); see `_Tree` / `_TreeFoliage`.
+  final List<_Tree> _trees = <_Tree>[];
+  final List<_TreeFoliage> _foliages = <_TreeFoliage>[];
+  InstancedMesh? _treeTrunks;
   // Houses are instanced per part, and the roof additionally per colour —
   // a batch binds one material, so four roof colours means four roof meshes.
   // `_houseData` is (x, phaseZ, scale, roofIndex) per house; `_houseRoofSlot`
@@ -1083,20 +1096,7 @@ class _GamePageState extends State<GamePage>
       _dashes!.addInstance(vm.Matrix4.identity());
     }
     _scene.add(Node()..addComponent(InstancedMeshComponent(_dashes!)));
-    for (int j = 0; j < postCount; j++) {
-      final Node l = _tree(
-          pine: j.isEven,
-          scale: 1.15 + _rng.nextDouble() * 0.95,
-          foliage: _foliageColor(j.isEven));
-      final Node r = _tree(
-          pine: j.isOdd,
-          scale: 1.15 + _rng.nextDouble() * 0.95,
-          foliage: _foliageColor(j.isOdd));
-      _postsL.add(l);
-      _postsR.add(r);
-      _scene.add(l);
-      _scene.add(r);
-    }
+    _buildTrees();
     // Houses: box walls + a 4-sided pyramid roof (a cone with 4 radial
     // segments), instanced per part. 40 draw calls become 7.
     _houseWalls = InstancedMesh(
@@ -1436,80 +1436,104 @@ class _GamePageState extends State<GamePage>
     return cAutumn;
   }
 
-  /// A low-poly tree: a trunk cylinder plus cone (pine) or sphere (round)
-  /// foliage, under a `body` scale node so the painter can still drive the
-  /// root's position each frame. The base sits at the root origin (y = 0).
-  Node _tree({required bool pine, required double scale, required int foliage}) {
-    final Node root = Node();
-    final Node body = Node()
-      ..localTransform = vm.Matrix4.diagonal3Values(scale, scale, scale);
-    root.add(body);
+  /// Builds the instanced roadside trees.
+  ///
+  /// Two passes, because the mesh set cannot be known up front: the foliage
+  /// colour is drawn at random per tree, so pass one decides every tree's type,
+  /// colour, scale and phase, and pass two allocates exactly the meshes those
+  /// choices need. Only non-empty meshes reach the scene — an unused
+  /// (geometry, colour) pair would otherwise be a render item drawing nothing.
+  void _buildTrees() {
+    // Pass 1: choose each tree, grouping by foliage colour as we go.
+    final List<bool> pines = <bool>[];
+    final List<double> scales = <double>[];
+    final List<double> xs = <double>[];
+    final List<double> phases = <double>[];
+    final List<_TreeFoliage> groups = <_TreeFoliage>[];
+    final List<int> slots = <int>[];
 
-    const double trunkH = 0.7;
-    body.add(Node(
-        mesh: Mesh(
-            CylinderGeometry(
-                bottomRadius: 0.13,
-                topRadius: 0.11,
-                height: trunkH,
-                radialSegments: 8),
-            _matte(cTrunk)))
-      ..localTransform = vm.Matrix4.translationValues(0, trunkH / 2, 0));
+    _TreeFoliage groupFor(int hex) {
+      for (final _TreeFoliage f in _foliages) {
+        if (f.colorHex == hex) return f;
+      }
+      final _TreeFoliage f = _TreeFoliage(hex);
+      _foliages.add(f);
+      return f;
+    }
 
-    if (pine) {
-      // Three stacked cones -> a full, layered conifer (smoother radial count).
-      const double h1 = 1.2, h2 = 0.95, h3 = 0.72;
-      body.add(Node(
-          mesh: Mesh(
-              CylinderGeometry(
-                  bottomRadius: 0.82,
-                  topRadius: 0.0,
-                  height: h1,
-                  radialSegments: 12),
-              _matte(foliage)))
-        ..localTransform =
-            vm.Matrix4.translationValues(0, trunkH + h1 / 2 - 0.15, 0));
-      body.add(Node(
-          mesh: Mesh(
-              CylinderGeometry(
-                  bottomRadius: 0.6,
-                  topRadius: 0.0,
-                  height: h2,
-                  radialSegments: 12),
-              _matte(foliage)))
-        ..localTransform =
-            vm.Matrix4.translationValues(0, trunkH + h1 + h2 / 2 - 0.55, 0));
-      body.add(Node(
-          mesh: Mesh(
-              CylinderGeometry(
-                  bottomRadius: 0.4,
-                  topRadius: 0.0,
-                  height: h3,
-                  radialSegments: 12),
-              _matte(foliage)))
-        ..localTransform = vm.Matrix4.translationValues(
-            0, trunkH + h1 + h2 + h3 / 2 - 0.95, 0));
-    } else {
-      // A center sphere plus a few overlapping blobs -> a rounded, leafy crown.
-      const double cy = trunkH + 0.62;
-      body.add(Node(
-          mesh: Mesh(IcosphereGeometry(radius: 0.64, subdivisions: 2),
-              _matte(foliage)))
-        ..localTransform = vm.Matrix4.translationValues(0, cy, 0));
-      const List<List<double>> blobs = <List<double>>[
-        <double>[0.4, 0.04, 0.12, 0.42],
-        <double>[-0.36, 0.0, -0.14, 0.42],
-        <double>[0.05, 0.4, -0.05, 0.4],
-      ];
-      for (final List<double> b in blobs) {
-        body.add(Node(
-            mesh: Mesh(IcosphereGeometry(radius: b[3], subdivisions: 2),
-                _matte(foliage)))
-          ..localTransform =
-              vm.Matrix4.translationValues(b[0], cy + b[1], b[2]));
+    for (int j = 0; j < postCount; j++) {
+      for (int side = 0; side < 2; side++) {
+        // Alternating pine/round per side, exactly as the node version did.
+        final bool pine = side == 0 ? j.isEven : j.isOdd;
+        final _TreeFoliage g = groupFor(_foliageColor(pine));
+        pines.add(pine);
+        scales.add(1.15 + _rng.nextDouble() * 0.95);
+        xs.add(side == 0 ? -treeX : treeX);
+        phases.add(j * postSpacing);
+        groups.add(g);
+        slots.add(pine ? g.pineCount++ : g.roundCount++);
       }
     }
-    return root;
+
+    // Pass 2: one trunk mesh for every tree (they share a colour), then the
+    // per-colour foliage meshes each group actually needs.
+    _treeTrunks = InstancedMesh(
+        geometry: CylinderGeometry(
+            bottomRadius: 0.13,
+            topRadius: 0.11,
+            height: trunkH,
+            radialSegments: 8),
+        material: _matte(cTrunk));
+    for (int i = 0; i < pines.length; i++) {
+      _treeTrunks!.addInstance(vm.Matrix4.identity());
+    }
+    _scene.add(Node()..addComponent(InstancedMeshComponent(_treeTrunks!)));
+
+    for (final _TreeFoliage f in _foliages) {
+      if (f.pineCount > 0) {
+        for (final List<double> t in _pineTierDims) {
+          final InstancedMesh m = InstancedMesh(
+              geometry: CylinderGeometry(
+                  bottomRadius: t[0],
+                  topRadius: 0.0,
+                  height: t[1],
+                  radialSegments: 12),
+              material: _matte(f.colorHex));
+          for (int i = 0; i < f.pineCount; i++) {
+            m.addInstance(vm.Matrix4.identity());
+          }
+          f.pineTiers.add(m);
+          _scene.add(Node()..addComponent(InstancedMeshComponent(m)));
+        }
+      }
+      if (f.roundCount > 0) {
+        for (int b = 0; b < _roundBlobRadii.length; b++) {
+          final InstancedMesh m = InstancedMesh(
+              geometry: IcosphereGeometry(
+                  radius: _roundBlobRadii[b], subdivisions: 2),
+              material: _matte(f.colorHex));
+          // The middle radius carries two blobs per tree.
+          final int per = b == 1 ? 2 : 1;
+          for (int i = 0; i < f.roundCount * per; i++) {
+            m.addInstance(vm.Matrix4.identity());
+          }
+          f.roundBlobs.add(m);
+          _scene.add(Node()..addComponent(InstancedMeshComponent(m)));
+        }
+      }
+    }
+
+    for (int i = 0; i < pines.length; i++) {
+      _trees.add(_Tree(
+        x: xs[i],
+        phaseZ: phases[i],
+        scale: scales[i],
+        pine: pines[i],
+        foliage: groups[i],
+        slot: slots[i],
+        trunkSlot: i,
+      ));
+    }
   }
 
   // --- obstacle shapes (base at origin; painter places them at roadTopY) ----

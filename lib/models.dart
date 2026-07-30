@@ -25,6 +25,55 @@ class _Coin {
   double restX = 0;
 }
 
+/// One roadside tree, as instance bookkeeping rather than a node tree.
+///
+/// A tree's parts live in different `InstancedMesh`es depending on its type
+/// (pine vs round) and its foliage colour, because a batch binds one material.
+/// [slot] is this tree's index **inside its foliage group's** meshes, which is
+/// not its index in `_trees`; [trunkSlot] is its index in the single shared
+/// trunk mesh.
+class _Tree {
+  _Tree({
+    required this.x,
+    required this.phaseZ,
+    required this.scale,
+    required this.pine,
+    required this.foliage,
+    required this.slot,
+    required this.trunkSlot,
+  });
+
+  final double x;
+  final double phaseZ;
+  final double scale;
+  final bool pine;
+  final _TreeFoliage foliage;
+  final int slot;
+  final int trunkSlot;
+}
+
+/// The instanced meshes for one foliage colour.
+///
+/// Pines and round trees never share a mesh even at the same colour — their
+/// geometries differ — so a colour that both types use carries both lists.
+/// Empty lists are normal: a colour only reachable by round trees has no pine
+/// tiers, and unused meshes are never added to the scene.
+class _TreeFoliage {
+  _TreeFoliage(this.colorHex);
+
+  final int colorHex;
+
+  /// Three stacked cone tiers, widest first.
+  final List<InstancedMesh> pineTiers = <InstancedMesh>[];
+
+  /// Crown spheres by radius: 0.64 centre, 0.42 side blob, 0.40 top blob.
+  /// The 0.42 mesh carries **two** instances per tree (see `_Tree.slot`).
+  final List<InstancedMesh> roundBlobs = <InstancedMesh>[];
+
+  int pineCount = 0;
+  int roundCount = 0;
+}
+
 /// A launch ramp. Additive only — it never blocks the runner, it just
 /// replaces a grounded jump with a stronger one while overlapped.
 class _Ramp {

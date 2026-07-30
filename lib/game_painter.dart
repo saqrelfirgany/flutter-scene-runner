@@ -38,6 +38,32 @@ class _GamePainter extends CustomPainter {
   /// into [_scratch] and must not clobber the base between parts.
   static final vm.Matrix4 _base = vm.Matrix4.identity();
 
+  // Tree part-local transforms. Built once: they are pure constants derived
+  // from `trunkH` and the tier/blob tables, and rebuilding them per frame would
+  // reintroduce exactly the allocation churn this painter avoids.
+  static final vm.Matrix4 _kTrunk =
+      vm.Matrix4.translationValues(0, _GamePageState.trunkH / 2, 0);
+
+  static final List<vm.Matrix4> _kPineTiers = <vm.Matrix4>[
+    // Each tier sits on the one below with a deliberate overlap, so the cones
+    // read as a single layered conifer rather than three stacked hats.
+    vm.Matrix4.translationValues(0, _GamePageState.trunkH + 1.2 / 2 - 0.15, 0),
+    vm.Matrix4.translationValues(
+        0, _GamePageState.trunkH + 1.2 + 0.95 / 2 - 0.55, 0),
+    vm.Matrix4.translationValues(
+        0, _GamePageState.trunkH + 1.2 + 0.95 + 0.72 / 2 - 0.95, 0),
+  ];
+
+  /// Crown centre height for the round trees.
+  static const double _crownY = _GamePageState.trunkH + 0.62;
+  static final vm.Matrix4 _kCrown = vm.Matrix4.translationValues(0, _crownY, 0);
+  static final vm.Matrix4 _kBlobA =
+      vm.Matrix4.translationValues(0.4, _crownY + 0.04, 0.12);
+  static final vm.Matrix4 _kBlobB =
+      vm.Matrix4.translationValues(-0.36, _crownY, -0.14);
+  static final vm.Matrix4 _kBlobTop =
+      vm.Matrix4.translationValues(0.05, _crownY + 0.4, -0.05);
+
   /// Writes `_base * partLocal` into instance [index] of [mesh].
   static void _compose(InstancedMesh mesh, int index, vm.Matrix4 partLocal) {
     _scratch.setFrom(_base);
@@ -104,13 +130,32 @@ class _GamePainter extends CustomPainter {
       }
     }
 
-    // ---- roadside props (individual nodes) --------------------------------
-    // Trees and houses stay individual because each carries its own foliage or
-    // roof colour, and instancing shares one material across the whole set.
-    for (int j = 0; j < state._postsL.length; j++) {
-      final double z = wrapZ(j * _GamePageState.postSpacing);
-      _place(state._postsL[j], -_GamePageState.treeX, _GamePageState.roadTopY, z);
-      _place(state._postsR[j], _GamePageState.treeX, _GamePageState.roadTopY, z);
+    // ---- roadside trees (instanced, composed per part) --------------------
+    // `_base` is the tree's own world transform (position × uniform scale) and
+    // every part is `_base * partLocal` — the composition the old
+    // root -> body(scale) -> parts node tree used to do for us. All 18 trees
+    // are always on screen, so this was the largest fixed draw-call cost.
+    final InstancedMesh? trunks = state._treeTrunks;
+    for (final _Tree tr in state._trees) {
+      _base.setIdentity();
+      _base.setTranslationRaw(tr.x, _GamePageState.roadTopY, wrapZ(tr.phaseZ));
+      _base.scaleByDouble(tr.scale, tr.scale, tr.scale, 1.0);
+
+      if (trunks != null) _compose(trunks, tr.trunkSlot, _kTrunk);
+
+      final _TreeFoliage f = tr.foliage;
+      if (tr.pine) {
+        for (int t = 0; t < f.pineTiers.length; t++) {
+          _compose(f.pineTiers[t], tr.slot, _kPineTiers[t]);
+        }
+      } else {
+        // Blob radii are [0.64, 0.42, 0.40] and the 0.42 mesh holds two blobs
+        // per tree, so its slots are 2*slot and 2*slot + 1.
+        _compose(f.roundBlobs[0], tr.slot, _kCrown);
+        _compose(f.roundBlobs[1], tr.slot * 2, _kBlobA);
+        _compose(f.roundBlobs[1], tr.slot * 2 + 1, _kBlobB);
+        _compose(f.roundBlobs[2], tr.slot, _kBlobTop);
+      }
     }
 
     // Houses are instanced per part, so each part's instance transform is
