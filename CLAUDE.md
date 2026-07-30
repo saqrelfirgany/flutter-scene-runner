@@ -145,6 +145,8 @@ Read this before changing anything that affects the frame. The costs are not whe
 
 The only numbers in this file that came from a running build rather than from reading source. Serve a release build over http (a `--base-href` build **must** be served from a matching path or Flutter never boots) and read the fps in the HUD capsule.
 
+> **The window must be frontmost while you read the number, and you must read it within a few seconds of interacting.** Both Chrome and macOS stop rendering an app that is not the active window — the tick rate collapses and the fps readout, which is an exponential average, decays after it. A run left idle reads 45 → 30 → 20 → 13 and looks exactly like a progressive performance leak. It is not one: process RSS holds flat, and a native run stops emitting frames entirely once its window is occluded. Do not go hunting for that "bug"; it cost an afternoon already.
+
 | Configuration | HIGH | FAST | Shadows |
 |---|---|---|---|
 | 4 cascades @ 1024² | 12 fps | 12 fps | black blob across the near road |
@@ -165,20 +167,33 @@ expected to be significant. None was:
 | `renderScale` 1.0 → 0.7 (half the pixels) | +2–5 fps |
 | `shadowMaxDistance` 42 → 24 | **0 fps** (kept anyway — it is a visual win, see below) |
 | `castsShadow: false` — the entire shadow system off | **+5 fps** |
+| `postProcess.bloom` + `colorGrading` both off | **0 fps** |
+| `flutter build web --wasm` (WasmGC instead of JS) | no clear difference — see the caveat below |
+| **Native macOS / Metal, release** | **~45 fps** — the same as web |
+
+That native row is the one that closes the question. The frame is **not** limited by WebGL2 or by JS: Metal renders the same scene at the same rate. Whatever the remaining cost is, it is platform-independent, and no subsystem above accounts for more than ~10% of it.
 
 That last row is the important one. **Shadows cost about 10% of the frame, not most of it.** The 12 fps in the table above was 4 cascades at 1024² being pathological, not shadows being inherently expensive here.
 
-When no single subsystem accounts for more than ~10%, the cost is the engine's
-fixed per-frame overhead on WebGL2 — walking render items, BVH updates, uniform
-uploads, and the JS→WebGL cost of each draw. **~46–50 fps is close to the
-ceiling for this scene on the web** without a structural change (fewer distinct
-instanced sets, which costs colour variety) . Two things worth knowing before
-anyone spends more effort here:
+Shadows, fill, instance bookkeeping and post-processing have each been measured
+and none is more than ~10%. Native Metal matches web, so the backend is not the
+limit either. **~45–48 fps is what this scene costs in `flutter_scene` 0.19**,
+and there is no single thing left to fix.
 
-- **Native macOS/Metal has never been measured.** Draw calls are far cheaper
-  there; the web is the weakest target and the one all these numbers come from.
-- The reverted baked-scatter experiment is written up in git history rather than
-  kept in the tree. Don't re-derive it expecting a big win — it was measured.
+What would actually move it, in order of expected return:
+
+- **Fewer render items overall.** The engine's per-item, per-frame work is the
+  one cost that scales with our content and hasn't been cut further. Pooled
+  obstacles are still composite nodes, and the tree/house/particle sets are
+  split across ~30 meshes purely to carry different colours. Merging colour
+  buckets would cut items directly — and cost visual variety, which is the
+  thing the whole target-reference pass exists to add. That is a real trade,
+  not a free win.
+- **A newer `flutter_scene`.** We are pinned to 0.19.0 and several of its own
+  doc comments are already stale relative to its code, which suggests the
+  renderer is moving quickly.
+- The reverted baked-scatter experiment is in git history rather than the tree.
+  Don't re-derive it expecting a big win — it was measured at +2 fps.
 
 Two things the first table settles:
 
