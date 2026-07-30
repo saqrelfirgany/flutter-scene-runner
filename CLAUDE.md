@@ -129,17 +129,35 @@ Obstacle **shape** is likewise fixed at build time, not at spawn: `_buildWorld()
 
 All tuning lives in the `static const` block at the top of `_GamePageState` (`game_state.dart`), grouped by concern (world / character / camera / movement / obstacles / coins / palette / juice / neon look / daylight world / road markings + shoulder / hills / guardrails / sign posts / ramps / obstacle variety / power-ups). Change gameplay feel and colour there, not inline.
 
-**Know which look knobs are live.** That block holds two generations of them. The daylight set is wired up: `sunIntensity`, `envIntensity`, `cFogDay`/`fogStartDay`/`fogEndDay`, `cSky*`, `cGrass*`, `decoCount`, `grassCount`, and the `c*` palette. The neon set — `coinGlow`, `postGlow`, `obstacleGlow`, `bloom*`, `vignetteIntensity`, `fog{Hex,Start,End}` — is **read by nothing**; editing those changes nothing on screen. Bloom and colour grading are hardcoded inline inside `_setupSceneLook()`, and there is **no vignette pass at all** despite the const. In practice `dashYaw`, `dashScale`, `sunIntensity`, `envIntensity`, `grassCount`, and `_powerColor` are the knobs actually touched most often. **Framing** has its own four — `camY` / `camZ` / `camTargetY` / `camTargetZ` — and nothing in the simulation reads them, so they are safe to nudge purely by eye.
+**Know which look knobs are live.** That block holds two generations of them. The daylight set is wired up: `sunIntensity`, `envIntensity`, `cFogDay`/`fogStartDay`/`fogEndDay`, `cSky*`, `cGrass*`, `decoCount`, `grassCount`, and the `c*` palette. The neon set — `coinGlow`, `postGlow`, `obstacleGlow`, `bloom*`, `vignetteIntensity`, `fog{Hex,Start,End}` — is **read by nothing**; editing those changes nothing on screen. Bloom and colour grading are hardcoded inline inside `_setupSceneLook()`. The engine *does* have a vignette pass (`scene.postProcess.vignette`, alongside `chromaticAberration` and `filmGrain`) — we simply never enable it, so the const drives nothing. In practice `dashYaw`, `dashScale`, `sunIntensity`, `envIntensity`, `grassCount`, and `_powerColor` are the knobs actually touched most often. **Framing** has its own four — `camY` / `camZ` / `camTargetY` / `camTargetZ` — and nothing in the simulation reads them, so they are safe to nudge purely by eye.
 
 ## Performance model
 
 Read this before changing anything that affects the frame. The costs are not where they look like they are, and two of them were documented wrongly for a while.
 
-**1. Shadows are the multiplier, not the geometry count.** `DirectionalLight` defaults to `shadowCascadeCount = 4` at `shadowMapResolution = 1024`, and every caster is re-rendered into each cascade its bounds touch, *on top of* the colour pass. With hundreds of noded meshes that is the single most expensive thing in the frame. `_setupSceneLook()` overrides the count to **2** (`shadowCascades`) because the camera never moves and `shadowMaxDistance` is only 42 units — four cascades buy nothing over that range. If shadows ever look blocky up close, raise `shadowMapRes` before raising the cascade count.
+### Measured baseline (web, Chrome/WebGL2, ~1486×812 window)
+
+The only numbers in this file that came from a running build rather than from reading source. Serve a release build over http (a `--base-href` build **must** be served from a matching path or Flutter never boots) and read the fps in the HUD capsule.
+
+| Configuration | HIGH | FAST | Shadows |
+|---|---|---|---|
+| 4 cascades @ 1024² | 12 fps | 12 fps | black blob across the near road |
+| **2 cascades @ 2048²** | **37 fps** | **43–46 fps** | clean |
+
+Two things that table settles:
+
+- **The frame is draw-call/geometry bound, not fill bound.** In the 4-cascade row, cutting pixel count in half (`renderScale` 1.0 → 0.7) bought *nothing*. `renderScale` only starts paying (~20%) once the shadow cost is off the critical path. Fix the dominant cost first; fill last.
+- **Below ~20 fps the game enters slow motion, it does not just look choppy.** `clampDt(dt, 0.05)` caps the simulation step, so at 12 fps the world advances 0.6 s per real second. If the score climbs implausibly slowly, read the fps before hunting for a bug in the scoring.
+
+**1. Shadows are the dominant cost, and cascade count is the part that matters.** Every caster is re-submitted into each cascade its bounds touch, *on top of* the colour pass — so cascade count is a **geometry** cost, while `shadowMapResolution` is a **memory** cost. The default is 4 cascades at 1024².
+
+`shadowMaxDistance` 150 → **42** is a free win on its own: the camera never travels and nothing beyond 42 units needs a shadow, and shrinking the range sharpens every cascade.
+
+Cutting cascades 4 → 2 *at 1024²* is what produced the black blob: it doubled each cascade's world footprint, halved the texel density, and flat ground began self-shadowing. **2 cascades at 2048² carries the same ~97 texels/unit as 4 at 1024² over the same 42 units, with half the geometry re-submissions** — that is the row that measured 3× faster with clean shadows. `shadowCascades` and `shadowMapRes` must move together; changing one alone brings the blob back.
 
 **2. `shadowStatic` is set on everything that never moves** — the grass slabs, road bed, dirt shoulders, edge lines and hills. The shadow pass then bakes them once instead of re-rendering them every frame. This is only safe because those nodes never change transform, geometry or material after `_buildWorld()`; a static node that *does* change keeps showing a stale shadow, so don't set the flag on anything the painter touches.
 
-**3. `Scene.renderScale` is the content-independent lever.** Three presets in `qualityScales` (1.0 / 0.85 / 0.7) behind the `HIGH · BALANCED · FAST` button, persisted under `quality.v1`. It trades sharpness for fragment work and helps on a device no geometry budget can save — reach for it last, but know it is there.
+**3. `Scene.renderScale` is a fill lever, and this game is not fill bound.** Three presets in `qualityScales` (1.0 / 0.85 / 0.7) behind the `HIGH · BALANCED · FAST` button, persisted under `quality.v1`. Worth ~20% once shadows are sane and **exactly zero** while they are not — see the table above. It is the last knob to reach for here, not the first.
 
 **4. The painter allocates nothing.** At ~1,600 transforms × 60 Hz, a `Matrix4` per transform would be ~96k allocations a second. Two techniques, and they are **not** interchangeable:
    - Instanced writes share one static scratch matrix, because `setInstanceTransform` copies (`_instances[i].setFrom(m)`).

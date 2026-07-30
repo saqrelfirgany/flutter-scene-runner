@@ -32,9 +32,13 @@ class _GamePageState extends State<GamePage>
   // Pulled in and down toward the reference framing, where Dash fills much
   // more of the frame. These four are the knobs to nudge by eye — nothing
   // else in the sim depends on them.
-  static const double camY = 2.35;
-  static const double camZ = 8.0;
-  static const double camTargetY = -1.15;
+  // Dash filled about a quarter of the frame height at camZ 8; the reference
+  // frames it at roughly half that. `PerspectiveCamera` uses a fixed vertical
+  // FOV, so this framing is aspect-independent — a portrait window and a
+  // landscape one crop the sides, not the top and bottom.
+  static const double camY = 2.9;
+  static const double camZ = 11.0;
+  static const double camTargetY = -0.85;
   static const double camTargetZ = -16.0;
 
   // --- movement tuning ----------------------------------------------------
@@ -130,14 +134,22 @@ class _GamePageState extends State<GamePage>
   static const double groundHalfW = 40.0; // grass reach each side of the road
   static const double groundLen = 280.0; // static grass length in z
   // --- shadow + render budget ---------------------------------------------
-  // `DirectionalLight` defaults to FOUR cascades at 1024², and every shadow
-  // caster is re-drawn into each cascade its bounds touch — on top of the
-  // colour pass. With ~350 individually-noded meshes that multiplier is the
-  // single most expensive thing in the frame, and four cascades only pay off
-  // over a long view distance. We shadow 42 units of road with a camera that
-  // never moves, so two cascades cover it with no visible difference.
+  // The real saving here is `shadowMaxDistance`: the default 150 spreads the
+  // cascade set over 3.5x the range we actually shadow, so cutting it to 42
+  // shrinks every cascade's footprint and sharpens the shadows for free.
+  //
+  // Cascade count is a *geometry* cost (every caster is re-submitted per
+  // cascade) while map resolution is a memory cost. Measured on web the frame
+  // is draw-call bound, not fill bound, so the win is to cut cascades — but
+  // cutting them alone at 1024² halved the shadow texel density and flat
+  // ground began self-shadowing into a large black blob across the near road.
+  //
+  // 2 cascades at 2048² carries the *same* texel density as 4 at 1024² over
+  // the same 42 units (~97 texels/unit either way) while halving the geometry
+  // re-submissions. Keep these two in step: raising the count or dropping the
+  // resolution without the other brings the blob back.
   static const int shadowCascades = 2;
-  static const int shadowMapRes = 1024;
+  static const int shadowMapRes = 2048;
   static const double shadowDistance = 42.0;
 
   // Fragment-cost knob: renders below native resolution and upscales on
@@ -1179,7 +1191,10 @@ class _GamePageState extends State<GamePage>
     // instance index -> side + z. Instances [0, n) are the left side, [n, 2n)
     // the right.
     _rails = InstancedMesh(
-        geometry: CuboidGeometry(vm.Vector3(0.07, 0.3, railSpacing * 0.92)),
+        // Beam length is the full spacing, not 92% of it: the 8% gap was
+        // invisible at distance but broke the rail into separate floating
+        // sticks in the near field, where one segment spans much of the screen.
+        geometry: CuboidGeometry(vm.Vector3(0.07, 0.3, railSpacing)),
         material: _matte(cRail));
     _railPosts = InstancedMesh(
         geometry: CuboidGeometry(vm.Vector3(0.09, 0.66, 0.09)),
@@ -1196,8 +1211,10 @@ class _GamePageState extends State<GamePage>
     // Roadside sign posts: a slim pole carrying a board near the top.
     _signPoles = InstancedMesh(
         geometry: CylinderGeometry(
-            bottomRadius: 0.05,
-            topRadius: 0.05,
+            // Was 0.05, which vanished at road distance and left the boards
+            // reading as grey squares floating in the trees.
+            bottomRadius: 0.085,
+            topRadius: 0.085,
             height: 2.0,
             radialSegments: 6),
         material: _matte(cSignPole));
