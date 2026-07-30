@@ -206,6 +206,13 @@ Still missing vs. the reference:
 - The trees nearest the camera fill the frame edges in a way the reference never
   does — either push `treeX` out or suppress the last few phases.
 
+**Performance is done for now — the frame is flat.** Four experiments after the
+46–48 fps build each returned 0–5 fps (table in `CLAUDE.md`), including turning
+shadows off entirely. Nothing dominates any more, so there is no single thing
+left to fix; the remaining cost is the engine's per-frame overhead on WebGL2.
+Don't spend more effort here without first measuring **native macOS/Metal**,
+which has never been checked and where draw calls are far cheaper.
+
 Cheap now that the frame is draw-call bound and has fragment headroom:
 - **`scene.ambientOcclusion`** (SSAO) — contact shadows where props meet the
   ground, the cue that most separates our look from the reference's.

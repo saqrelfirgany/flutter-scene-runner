@@ -150,7 +150,14 @@ class _GamePageState extends State<GamePage>
   // resolution without the other brings the blob back.
   static const int shadowCascades = 2;
   static const int shadowMapRes = 2048;
-  static const double shadowDistance = 42.0;
+  // 24, not 42, and the reason is *visual* — it measured as free either way.
+  // At 42 the tall roadside trees are still in shadow range and the sun angle
+  // throws their shadows right across the road, which is nothing like the
+  // reference's bright open asphalt. Cutting the range keeps the shadows that
+  // ground things (Dash, obstacles, near props) and drops the ones that only
+  // muddied the road. Fog starts at 40, so nothing visible loses a shadow it
+  // would have been read as having.
+  static const double shadowDistance = 24.0;
 
   // Fragment-cost knob: renders below native resolution and upscales on
   // composite. Independent of everything else, which makes it the safest lever

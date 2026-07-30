@@ -154,7 +154,33 @@ The only numbers in this file that came from a running build rather than from re
 
 Note the last row: **adding textures cost nothing measurable.** That is the same finding as the `renderScale` one from the other direction — a draw-call-bound frame has fragment budget to spare, so per-pixel work (texture samples, and by extension SSAO or a richer material) is close to free here while another `Node` is not.
 
-Two things that table settles:
+### The frame is now flat — nothing dominates, so stop looking for one thing
+
+Four separate experiments were run against the 46–48 fps build. Each was
+expected to be significant. None was:
+
+| Experiment | Result |
+|---|---|
+| Bake the 1,120 scenery instances over two wrap lengths and scroll the wrapper node instead — removes every per-instance write **and** the O(n) `aggregateBounds` recompute | **+2 fps** — reverted, not worth the doubled instance count |
+| `renderScale` 1.0 → 0.7 (half the pixels) | +2–5 fps |
+| `shadowMaxDistance` 42 → 24 | **0 fps** (kept anyway — it is a visual win, see below) |
+| `castsShadow: false` — the entire shadow system off | **+5 fps** |
+
+That last row is the important one. **Shadows cost about 10% of the frame, not most of it.** The 12 fps in the table above was 4 cascades at 1024² being pathological, not shadows being inherently expensive here.
+
+When no single subsystem accounts for more than ~10%, the cost is the engine's
+fixed per-frame overhead on WebGL2 — walking render items, BVH updates, uniform
+uploads, and the JS→WebGL cost of each draw. **~46–50 fps is close to the
+ceiling for this scene on the web** without a structural change (fewer distinct
+instanced sets, which costs colour variety) . Two things worth knowing before
+anyone spends more effort here:
+
+- **Native macOS/Metal has never been measured.** Draw calls are far cheaper
+  there; the web is the weakest target and the one all these numbers come from.
+- The reverted baked-scatter experiment is written up in git history rather than
+  kept in the tree. Don't re-derive it expecting a big win — it was measured.
+
+Two things the first table settles:
 
 - **The frame is draw-call/geometry bound, not fill bound.** In the 4-cascade row, cutting pixel count in half (`renderScale` 1.0 → 0.7) bought *nothing*. `renderScale` only starts paying (~20%) once the shadow cost is off the critical path. Fix the dominant cost first; fill last.
 - **Below ~20 fps the game enters slow motion, it does not just look choppy.** `clampDt(dt, 0.05)` caps the simulation step, so at 12 fps the world advances 0.6 s per real second. If the score climbs implausibly slowly, read the fps before hunting for a bug in the scoring.
@@ -175,7 +201,7 @@ Cutting cascades 4 → 2 *at 1024²* is what produced the black blob: it doubled
 
 **5. Deliberately not used.** `LodComponent` exists and is a good fit in principle, but it draws a *single* mesh and our trees and houses are composite `Node` trees — it cannot select a level for a subtree, so adopting it means restructuring those props first. `depth_prepass` and `object_filter` are likewise available and untried; a prepass trades an extra pass for less overdraw, which only pays off once measured.
 
-**6. One known cost with no clean fix.** `InstancedMesh.setInstanceTransform` marks bounds dirty, and `InstancedMeshComponent.refreshRenderItem` reads `aggregateBounds` every frame — so every moving instanced set recomputes an O(n) AABB, allocating one `Aabb3` per instance, per frame. Avoiding it would mean not moving instances at all: lay the field out over *two* wrap lengths and scroll the wrapper `Node` instead, resetting it every `totalLen`. That is a real technique and a real redesign; it hasn't been done.
+**6. One known cost that turned out not to matter.** `InstancedMesh.setInstanceTransform` marks bounds dirty, and `InstancedMeshComponent.refreshRenderItem` reads `aggregateBounds` every frame — so every moving instanced set recomputes an O(n) AABB, allocating one `Aabb3` per instance, per frame. That reads like a serious cost, and the documented fix (lay the field out over *two* wrap lengths and scroll the wrapper `Node` so instances never move) was built and measured: **+2 fps**, for double the instances and a wider scene AABB. Reverted. Don't rebuild it on the strength of the reasoning — the reasoning is sound and the measurement still says no.
 
 **Measure, don't reason.** The HUD capsule carries a live fps readout. Every claim above came from reading `flutter_scene`'s source at the pinned version, not from the package's own doc comments — which are stale in at least one load-bearing place.
 
