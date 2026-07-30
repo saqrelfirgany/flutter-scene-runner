@@ -15,6 +15,10 @@ import 'package:vector_math/vector_math.dart' as vm;
 // can import it without dragging in flutter_scene.
 import 'game_math.dart' as gm;
 
+// Procedural surface textures, generated at startup rather than bundled. Also
+// a standalone library so the pixel generators are unit-testable without a GPU.
+import 'game_textures.dart' as gt;
+
 part 'game_state.dart';
 part 'game_painter.dart';
 part 'models.dart';

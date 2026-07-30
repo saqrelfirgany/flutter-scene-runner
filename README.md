@@ -21,7 +21,7 @@
 
 **أحمد الفرجاني** — Senior Flutter Engineer
 <br/>
-<a href="https://github.com/saqrelfirgany">GitHub</a> • <a href="https://www.linkedin.com/in/ahmed-elfirgany-a71635396/">LinkedIn</a>
+<a href="https://github.com/saqrelfirgany">GitHub</a> • <a href="https://www.linkedin.com/in/saqrelfirgany/">LinkedIn</a>
 
 </div>
 
@@ -146,7 +146,7 @@ fvm flutter run -d chrome
 
 📬 مفتوح لفرص **Senior / Lead** في تطوير الموبايل، وأعمال freelance مختارة.
 <br/>
-[GitHub](https://github.com/saqrelfirgany) • [LinkedIn](https://www.linkedin.com/in/ahmed-elfirgany-a71635396/)
+[GitHub](https://github.com/saqrelfirgany) • [LinkedIn](https://www.linkedin.com/in/saqrelfirgany/)
 
 ## اعتمادات
 

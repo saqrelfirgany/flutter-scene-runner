@@ -159,6 +159,29 @@ model in `CLAUDE.md` § "Performance model"; the headlines:
 - Analyzer baseline improved 23 → 14 (all nine `Matrix4.scale` deprecations
   gone).
 
+### Measured pass (2026-07-30) — first time the build was actually run
+
+Served the release web build locally and read the fps from the HUD. Every
+number before this was inferred from reading the engine source; these are not.
+
+**12 fps → 46–48 fps**, and the black blob that was sitting across the near road
+is gone. Full table and reasoning in `CLAUDE.md` § "Measured baseline".
+
+- The blob was mine: an unverified cascade cut. Fixed by pairing 2 cascades with
+  a 2048² map, same texel density, half the geometry submissions.
+- Trees instanced (they were the largest fixed draw-call cost — all 18 are
+  always on screen).
+- **Procedural textures** on the asphalt, ground and dirt shoulder — generated
+  arithmetically at startup, no bundled images, no licensing. This closes the
+  "speckled asphalt" gap listed below.
+- Guardrail beams were 92% of their spacing (floating sticks up close) and sign
+  poles were too thin to see (boards hanging in the trees). Both fixed.
+
+The lesson worth keeping: the frame is **draw-call bound, not fill bound**, so
+visual richness that costs *fragments* (textures, and by extension SSAO or
+image-based lighting) is nearly free here, while anything that adds a `Node` is
+not. That inverts the usual instinct — spend on shading, not on geometry.
+
 ## 4. Roadmap — remaining gap to the target
 
 Next, and needing Ahmed's eyes first:
@@ -179,8 +202,17 @@ Next, and needing Ahmed's eyes first:
 
 Still missing vs. the reference:
 - **Wooden bridge / boardwalk** road sections (target-09, target-15).
-- **Speckled asphalt** detail; richer road wear.
 - **Bare/dead trees** for silhouette variety (the reference has several).
+- The trees nearest the camera fill the frame edges in a way the reference never
+  does — either push `treeX` out or suppress the last few phases.
+
+Cheap now that the frame is draw-call bound and has fragment headroom:
+- **`scene.ambientOcclusion`** (SSAO) — contact shadows where props meet the
+  ground, the cue that most separates our look from the reference's.
+- **`EnvironmentMap.fromSky()` / `studio()`** — image-based lighting with no
+  asset, which is the single biggest PBR realism lever available.
+- **Normal maps** on the asphalt and dirt (`normalTexture`, generated the same
+  way as the albedo) so the sun catches the surface.
 
 Feature depth & platforms (separate tracks Ahmed picked):
 - Perf & feel (isolate the Dash glTF load off the first frame, collision juice).

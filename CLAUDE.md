@@ -21,6 +21,12 @@ The game is **one Dart library split across four files**, joined with `part` / `
 Plus one file that is **not** part of that library:
 
 - `lib/game_math.dart` — a standalone, GPU-free library of pure gameplay math, imported by `main.dart` as `gm`. It exists so the arithmetic is unit-testable (the game widget is not — see below). Prefixed on import because names like `wrapZ` also exist as painter locals and a silent shadow would be hard to spot.
+- `lib/game_textures.dart` — surface textures, generated arithmetically at startup and returned as raw RGBA pixels for `Texture2D.fromPixels`. Imported as `gt`; also standalone so the generators are testable without a GPU.
+
+**Textures are procedural, and that is a deliberate constraint, not a shortcut.** Nothing is bundled and nothing is downloaded: the road, ground and shoulder tones are computed, which keeps them original work with no third-party licence attached to a public portfolio repo — the same reasoning as synthesizing the SFX. Two things to know before adding more:
+
+- **Do not use `flutter_scene`'s `FastNoiseLite` / `bakeNoiseTexture` here.** Its own docs disqualify them for us: the Dart implementation relies on 32-bit integer arithmetic that overflows on the web, where Dart `int` is a JS double. This game ships to GitHub Pages, so `game_textures.dart` is pure `double` math instead (a `fract(sin(…))` lattice hash), which behaves the same on both backends.
+- **`CuboidGeometry` gives each face a 0..1 UV**, so one texture covers one face and there is no UV scaling short of a custom material. That makes texel density a function of the *object's* size: a 6×4 road tile at 256² lands ~43 texels/unit, while the ~280-unit ground slab gets under one. Fine detail belongs on small objects; big surfaces get low-frequency variation that is *meant* to stretch. `addressMode` already defaults to `repeat`, and the noise helpers are lattice-wrapped so they tile seamlessly when something does repeat.
 
 The character is the Flutter mascot **Dash**, imported from `assets/models/dash.glb` at runtime via `Node.fromGlbAsset` with blended Idle/Run/Jump clips. Extras layered on: post-FX (`_setupSceneLook`: sun + shadows + fog + bloom + colour grade), power-ups (magnet/shield/×2), SFX via `audioplayers` with a persisted 3-step volume, and score sharing via `Clipboard`.
 
@@ -83,7 +89,7 @@ The exact count moves whenever the Flutter master pin bumps, so re-run analyze t
 
 ### Tests: the pure math is covered, the game itself cannot be
 
-`fvm flutter test` runs **21 real tests** over `lib/game_math.dart`. That file is a standalone library — **not** a `part` of the game — holding every piece of gameplay arithmetic that needs no GPU: `laneX`, `wrapZ`, `smoothing`, `overlaps1D`, `speedAt`, `clampDt`, `linearFromHex`, `glowFromHex`, `ordinal`. The game calls straight into it (`_laneX`, `_curSpeed`, `_linearFromHex` etc. are thin aliases), so the tests cover shipping code rather than a copy.
+`fvm flutter test` runs **34 real tests** over `lib/game_math.dart` and `lib/game_textures.dart`. Both are standalone libraries — **not** a `part` of the game — holding every piece of gameplay arithmetic that needs no GPU: `laneX`, `wrapZ`, `smoothing`, `overlaps1D`, `speedAt`, `clampDt`, `linearFromHex`, `glowFromHex`, `ordinal`. The game calls straight into it (`_laneX`, `_curSpeed`, `_linearFromHex` etc. are thin aliases), so the tests cover shipping code rather than a copy.
 
 **When you add gameplay math, put it there and add a case to `test/game_math_test.dart`.** Two things to know before writing one:
 
@@ -142,7 +148,11 @@ The only numbers in this file that came from a running build rather than from re
 | Configuration | HIGH | FAST | Shadows |
 |---|---|---|---|
 | 4 cascades @ 1024² | 12 fps | 12 fps | black blob across the near road |
-| **2 cascades @ 2048²** | **37 fps** | **43–46 fps** | clean |
+| 2 cascades @ 2048² | 37 fps | 43–46 fps | clean |
+| + instanced trees | 41–47 fps | — | clean |
+| **+ procedural textures** | **46–48 fps** | — | clean |
+
+Note the last row: **adding textures cost nothing measurable.** That is the same finding as the `renderScale` one from the other direction — a draw-call-bound frame has fragment budget to spare, so per-pixel work (texture samples, and by extension SSAO or a richer material) is close to free here while another `Node` is not.
 
 Two things that table settles:
 

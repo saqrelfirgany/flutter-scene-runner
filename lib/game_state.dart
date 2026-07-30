@@ -343,6 +343,12 @@ class _GamePageState extends State<GamePage>
   final List<_Tree> _trees = <_Tree>[];
   final List<_TreeFoliage> _foliages = <_TreeFoliage>[];
   InstancedMesh? _treeTrunks;
+
+  // Procedural surface textures, uploaded once in `_buildTextures()`.
+  late final Texture2D _texAsphaltA;
+  late final Texture2D _texAsphaltB;
+  late final Texture2D _texGrass;
+  late final Texture2D _texDirt;
   // Houses are instanced per part, and the roof additionally per colour —
   // a batch binds one material, so four roof colours means four roof meshes.
   // `_houseData` is (x, phaseZ, scale, roofIndex) per house; `_houseRoofSlot`
@@ -1005,17 +1011,21 @@ class _GamePageState extends State<GamePage>
   }
 
   void _buildWorld() {
+    _buildTextures();
+
     // Static ground: grass fields either side + a continuous road bed. They
     // never move, so they're placed once here (not in paint()) and they catch
     // the sun's shadows.
-    final Node grassL =
-        _litBox(vm.Vector3(groundHalfW, 0.4, groundLen), cGrass, rough: 1.0)
-          ..localTransform = vm.Matrix4.translationValues(
-              -(roadWidth / 2 + groundHalfW / 2), roadTopY - 0.2, -20);
-    final Node grassR =
-        _litBox(vm.Vector3(groundHalfW, 0.4, groundLen), cGrass, rough: 1.0)
-          ..localTransform = vm.Matrix4.translationValues(
-              roadWidth / 2 + groundHalfW / 2, roadTopY - 0.2, -20);
+    final Node grassL = Node(
+        mesh: Mesh(CuboidGeometry(vm.Vector3(groundHalfW, 0.4, groundLen)),
+            _textured(_texGrass)))
+      ..localTransform = vm.Matrix4.translationValues(
+          -(roadWidth / 2 + groundHalfW / 2), roadTopY - 0.2, -20);
+    final Node grassR = Node(
+        mesh: Mesh(CuboidGeometry(vm.Vector3(groundHalfW, 0.4, groundLen)),
+            _textured(_texGrass)))
+      ..localTransform = vm.Matrix4.translationValues(
+          roadWidth / 2 + groundHalfW / 2, roadTopY - 0.2, -20);
     final Node roadBed =
         _litBox(vm.Vector3(roadWidth + 0.1, 0.3, groundLen), cAsphaltB)
           ..localTransform =
@@ -1036,8 +1046,9 @@ class _GamePageState extends State<GamePage>
     // hair above roadTopY so it can't z-fight the road or the grass, which
     // both top out exactly at roadTopY.
     for (final double side in <double>[-1.0, 1.0]) {
-      _scene.add(_litBox(
-          vm.Vector3(shoulderW, 0.08, groundLen), cShoulder, rough: 1.0)
+      _scene.add(Node(
+          mesh: Mesh(CuboidGeometry(vm.Vector3(shoulderW, 0.08, groundLen)),
+              _textured(_texDirt)))
         ..shadowStatic = true
         ..localTransform = vm.Matrix4.translationValues(
             side * shoulderX, roadTopY - 0.03, -20));
@@ -1073,12 +1084,14 @@ class _GamePageState extends State<GamePage>
     }
 
     // Road tiles: 18 slabs in two alternating tones, instanced per tone.
+    // Textured asphalt. A tile's 0..1 UV covers 6x4 units, so a 256² texture
+    // lands ~43 texels/unit — enough for the aggregate grit to read at speed.
     _tilesA = InstancedMesh(
         geometry: CuboidGeometry(vm.Vector3(roadWidth, 0.2, segLen * 0.96)),
-        material: _matte(cAsphaltA));
+        material: _textured(_texAsphaltA, rough: 0.92));
     _tilesB = InstancedMesh(
         geometry: CuboidGeometry(vm.Vector3(roadWidth, 0.2, segLen * 0.96)),
-        material: _matte(cAsphaltB));
+        material: _textured(_texAsphaltB, rough: 0.92));
     for (int i = 0; i < tileCount; i++) {
       (i.isEven ? _tilesA! : _tilesB!).addInstance(vm.Matrix4.identity());
     }
@@ -1424,6 +1437,36 @@ class _GamePageState extends State<GamePage>
   PhysicallyBasedMaterial _matte(int colorHex) => PhysicallyBasedMaterial()
     ..baseColorFactor = _linearFromHex(colorHex)
     ..roughnessFactor = 1.0;
+
+  /// A matte material whose colour comes from [tex] rather than a flat factor.
+  ///
+  /// `baseColorFactor` **multiplies** the texture, so it must be white here —
+  /// the generated pixels already carry the surface's colour. Leaving the old
+  /// hex in place would double-darken the surface.
+  PhysicallyBasedMaterial _textured(Texture2D tex, {double rough = 1.0}) =>
+      PhysicallyBasedMaterial()
+        ..baseColorFactor = vm.Vector4(1, 1, 1, 1)
+        ..baseColorTexture = tex
+        ..roughnessFactor = rough;
+
+  /// Uploads the procedural surface textures.
+  ///
+  /// Called once at the top of `_buildWorld`, before any material that samples
+  /// them. Sizes are deliberately uneven: the road gets the most texels because
+  /// a tile's 0..1 UV covers only 6x4 units (~43 texels/unit), while the ground
+  /// slabs stretch one UV over ~280 units and would waste anything finer.
+  void _buildTextures() {
+    _texAsphaltA = Texture2D.fromPixels(
+        gt.asphaltPixels(256, cAsphaltA & 0xFFFFFF), 256, 256);
+    _texAsphaltB = Texture2D.fromPixels(
+        gt.asphaltPixels(256, cAsphaltB & 0xFFFFFF, seed: 29), 256, 256);
+    // Endpoints taken from the existing palette rather than invented, so the
+    // ground varies between the same greens the instanced tufts already use.
+    _texGrass = Texture2D.fromPixels(
+        gt.grassPixels(128, cGrass & 0xFFFFFF, cGrassB & 0xFFFFFF), 128, 128);
+    _texDirt = Texture2D.fromPixels(
+        gt.dirtPixels(128, cShoulder & 0xFFFFFF), 128, 128);
+  }
 
   /// Picks a foliage tint: pines stay green-ish; round trees occasionally go
   /// autumn for variety.
