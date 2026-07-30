@@ -414,6 +414,10 @@ class _GamePageState extends State<GamePage>
   // rather than assumed — this is the readout for that.
   double _fps = 60;
 
+  // Only allocated when the build asked for timings; see lib/game_bench.dart.
+  final bench.FrameBench? _bench =
+      bench.kBenchEnabled ? bench.FrameBench() : null;
+
   // power-up run state
   double _rampSpawnTimer = rampFirstDelay;
   double _powerSpawnTimer = powerFirstDelay;
@@ -440,6 +444,7 @@ class _GamePageState extends State<GamePage>
   @override
   void initState() {
     super.initState();
+    if (bench.kBenchEnabled) debugPrint('BENCH probe active');
     _buildWorld();
     _setupSceneLook();
     _loadDash();
@@ -461,6 +466,10 @@ class _GamePageState extends State<GamePage>
     // Smooth the RAW dt: the clamp below would floor the readout at 20 fps and
     // hide exactly the hitches worth seeing.
     if (dt > 0) _fps += (1 / dt - _fps) * 0.06;
+    // Fed the RAW delta, before the clamp below — otherwise everything slower
+    // than 20 fps would report as exactly 20.
+    final String? benchLine = _bench?.addFrame(dt);
+    if (benchLine != null) debugPrint(benchLine);
     dt = gm.clampDt(dt, maxFrameDt);
     if (_shakeT > 0) _shakeT = math.max(0, _shakeT - dt);
     _updateParticles(dt);

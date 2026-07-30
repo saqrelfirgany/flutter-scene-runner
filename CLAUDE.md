@@ -141,6 +141,10 @@ All tuning lives in the `static const` block at the top of `_GamePageState` (`ga
 
 Read this before changing anything that affects the frame. The costs are not where they look like they are, and two of them were documented wrongly for a while.
 
+> **Measuring is a documented procedure now — see `docs/PERFORMANCE.md`.** It holds the benchmark harness (`lib/game_bench.dart`, `--dart-define=BENCH=true`), the reason the metric is *the share of frames under one vsync* rather than an fps average, and the running log of what every change has measured. Everything in this section came from the HUD readout instead, whose spread is ±8 fps — fine for the 3× swings below, useless for anything smaller.
+>
+> The harness also corrects the headline: the median frame is **16.67 ms, a clean 60 fps**. The game is not "a 45 fps game" — it renders ~70% of frames at 60 and the rest miss the deadline and double to 33.3 ms. Read `docs/PERFORMANCE.md` before optimising anything, because optimising against an average here measures the wrong thing.
+
 ### Measured baseline (web, Chrome/WebGL2, ~1486×812 window)
 
 The only numbers in this file that came from a running build rather than from reading source. Serve a release build over http (a `--base-href` build **must** be served from a matching path or Flutter never boots) and read the fps in the HUD capsule.

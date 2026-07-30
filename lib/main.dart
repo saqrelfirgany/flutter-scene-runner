@@ -19,6 +19,10 @@ import 'game_math.dart' as gm;
 // a standalone library so the pixel generators are unit-testable without a GPU.
 import 'game_textures.dart' as gt;
 
+// Frame-time benchmark probe. Compiled out unless the build passes
+// --dart-define=BENCH=true; see lib/game_bench.dart.
+import 'game_bench.dart' as bench;
+
 part 'game_state.dart';
 part 'game_painter.dart';
 part 'models.dart';
