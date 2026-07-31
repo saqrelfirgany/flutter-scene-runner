@@ -162,11 +162,29 @@ class _GamePageState extends State<GamePage>
   // Fragment-cost knob: renders below native resolution and upscales on
   // composite. Independent of everything else, which makes it the safest lever
   // when a device simply cannot keep up. See `_quality` / `qualityScales`.
-  static const List<double> qualityScales = <double>[1.0, 0.85, 0.7];
+  // `renderScale` multiplies the *device* pixel ratio, so on a 2x display HIGH
+  // is already 4x the pixels of a 1x one. That is exactly how this shipped at
+  // 18 fps after measuring 45 — the measurement ran in a 1x window. Hence
+  // `_autoQuality` below: the preset has to follow the machine, not the
+  // developer's machine.
+  static const List<double> qualityScales = <double>[1.0, 0.85, 0.65];
+
+  /// Frame rate under which the game steps its own quality down a notch.
+  static const double autoQualityFloor = 45.0;
+
+  /// Seconds of play at a poor frame rate before stepping down. Long enough
+  /// that a load hitch or a backgrounded window can't trigger it.
+  static const double autoQualityDelay = 4.0;
   static const List<String> qualityNames = <String>['HIGH', 'BALANCED', 'FAST'];
 
-  static const double sunIntensity = 2.6; // softer key light (less harsh)
-  static const double envIntensity = 1.25; // strong ambient fill -> soft shadows
+  // Sun down, ambient up. The roadside trees legitimately cast across the road
+  // at this sun angle, and with a dark asphalt albedo a correctly-shadowed road
+  // still read as near-black slabs. `shadowAmbientStrength` is already at its
+  // physical 0.0 (shadow removes only the direct light), so the fix is not a
+  // shadow setting at all — it is the direct/ambient ratio. This is the
+  // "soft lighting over more geometry" lever from docs/VISION.md §2.1.
+  static const double sunIntensity = 2.1;
+  static const double envIntensity = 1.75;
   static const int cFogDay = 0xFFCDEBFF; // far road melts into the sky
   static const double fogStartDay = 40.0;
   static const double fogEndDay = 80.0;
@@ -434,6 +452,12 @@ class _GamePageState extends State<GamePage>
   // like volume, because it is a device capability choice, not a run setting.
   int _quality = 0;
 
+  // Auto-quality state. `_autoQualityDone` latches once the game has stepped
+  // down on its own or the player has touched the button, so it never fights
+  // a deliberate choice and never oscillates.
+  double _lowFpsFor = 0;
+  bool _autoQualityDone = false;
+
   // floating "+N" score popups (screen space, projected via the last camera)
   Camera? _lastCamera;
   Size _lastViewport = Size.zero;
@@ -470,6 +494,7 @@ class _GamePageState extends State<GamePage>
     // than 20 fps would report as exactly 20.
     final String? benchLine = _bench?.addFrame(dt);
     if (benchLine != null) debugPrint(benchLine);
+    _autoQuality(dt);
     dt = gm.clampDt(dt, maxFrameDt);
     if (_shakeT > 0) _shakeT = math.max(0, _shakeT - dt);
     _updateParticles(dt);
@@ -1337,6 +1362,15 @@ class _GamePageState extends State<GamePage>
           shadowCascadeCount: shadowCascades,
           shadowMapResolution: shadowMapRes,
           shadowMaxDistance: shadowDistance,
+          // Raised from the 0.02 defaults. Cascade fitting follows the camera
+          // frustum, so a taller or wider window spreads the same texels over
+          // more world and the depth comparison starts failing against itself —
+          // flat ground shadows itself in large dark patches. Tuning cascade
+          // count and resolution alone fixed it at one window size and it came
+          // straight back at another; bias is the part that does not depend on
+          // the viewport. Peter-panning at this sun angle is not visible.
+          shadowDepthBias: 0.06,
+          shadowNormalBias: 0.09,
         ),
       ),
     );
@@ -1767,7 +1801,44 @@ class _GamePageState extends State<GamePage>
   /// still helps on a device the geometry budget alone cannot save.
   void _applyQuality() => _scene.renderScale = qualityScales[_quality];
 
+  /// Steps the render scale down when the machine plainly cannot hold the
+  /// frame rate at the current preset.
+  ///
+  /// This exists because a fixed default is a bet on the developer's hardware.
+  /// `renderScale` multiplies the device pixel ratio, so the same preset is
+  /// four times the work on a 2x display — the game shipped at 18 fps on a
+  /// Retina window after measuring 45 in a 1x one.
+  ///
+  /// Deliberately one-way and one-shot per launch: it never steps back up (an
+  /// oscillating resolution is worse than a slightly soft one), it stops at the
+  /// lowest preset, and it stands down entirely once the player uses the
+  /// quality button, because an explicit choice outranks a guess.
+  void _autoQuality(double rawDt) {
+    if (_autoQualityDone || rawDt <= 0) return;
+    if (_phase != Phase.playing) return; // menus are not representative
+    if (_fps < autoQualityFloor) {
+      _lowFpsFor += rawDt;
+      if (_lowFpsFor >= autoQualityDelay) {
+        if (_quality < qualityScales.length - 1) {
+          setState(() => _quality++);
+          _applyQuality();
+          _saveQuality();
+          _lowFpsFor = 0;
+          // Give the next preset its own full window to prove itself before
+          // stepping again.
+          if (_quality >= qualityScales.length - 1) _autoQualityDone = true;
+        } else {
+          _autoQualityDone = true;
+        }
+      }
+    } else {
+      _lowFpsFor = 0;
+    }
+  }
+
   void _cycleQuality() {
+    // An explicit choice outranks the automatic one — stop second-guessing it.
+    _autoQualityDone = true;
     setState(() => _quality = (_quality + 1) % qualityScales.length);
     _applyQuality();
     _focus.requestFocus();
