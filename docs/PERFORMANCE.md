@@ -100,6 +100,36 @@ Append one row per measured change. "Verdict" is keep / revert / inconclusive.
 |---|---|---|---|---|
 | 2026-07-31 | *(baseline — no change)* | 70 % | — | — |
 
+### The device-measured round (2026-07-31)
+
+Everything above this line was measured on the development machine. The game
+then shipped and **measured 16 fps on the machine it was actually played on**,
+against 45–48 on the one it was tuned on. That gap is the most important entry
+in this file.
+
+Numbers below are read from the HUD during real play on the target machine
+(1648×914 at 1x ≈ 1.5 MP), not from automation.
+
+| Change | Result on target | Verdict |
+|---|---|---|
+| *(as shipped — fixed HIGH preset)* | **16 fps** | the failure |
+| Lighting: sun 2.6→2.1, ambient 1.25→1.75 | — | **Kept** — fixed dark slabs across the road, no frame cost |
+| fps-triggered auto quality step-down | **did not fire** | **Removed** — HIGH still selected after 20 s at 16 fps, cause never explained. Not shipped as something unexplained |
+| Render scale **derived** from pixel count vs a 1.1 MP budget | **27–39 fps** | **Kept** — deterministic, applies on frame one, cannot silently not happen |
+| Shadow cascades 2 → 1 @ 2048² | **31–33 fps** | **Kept** — two 2048² maps were 8.4 MP of shadow fill against a 1.1 MP screen |
+| Presets thin scenery (`qualityDensity`), default BALANCED | *pending* | awaiting a device reading |
+
+**Three lessons, in order of how much they cost:**
+
+1. **`renderScale` multiplies the device pixel ratio.** A fixed preset is a bet
+   on one machine's display. Derive it from the real pixel count.
+2. **Never compare an early run to a mid-run.** With nothing spawned the scene
+   is materially cheaper than it is with obstacles, coins and particles live.
+   Several readings in this file's history were compared across that boundary
+   and the conclusions drawn from them were noise.
+3. **A dev-machine number is not a result.** Every conclusion here held until it
+   met other hardware.
+
 ### Earlier experiments, measured against the old (mean-based) metric
 
 These predate this file and were judged on the HUD's fps readout, whose spread
