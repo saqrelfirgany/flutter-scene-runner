@@ -175,6 +175,21 @@ class _GamePageState extends State<GamePage>
   // developer's machine.
   static const List<double> qualityScales = <double>[1.0, 0.85, 0.65];
 
+  /// Share of the scattered scenery each preset actually draws.
+  ///
+  /// A resolution-only preset was not enough: at 82% scale a 1.5 MP window
+  /// still measured 31 fps, which means the scene costs what it costs
+  /// independently of how many pixels it lands on. So the presets scale
+  /// *content* too — the grass alone is 960 instances of three-sided cones,
+  /// and tiny triangles are expensive out of all proportion to their area.
+  ///
+  /// The instances stay allocated; the painter simply collapses the ones past
+  /// the cut to a zero scale (`_densityCut`). Nothing is rebuilt, so this can
+  /// change at runtime, and the world keeps its shape because the scatter is
+  /// random — dropping the tail thins the field evenly rather than clearing a
+  /// region of it.
+  static const List<double> qualityDensity = <double>[1.0, 0.55, 0.3];
+
   /// The most fragments the 3D scene may render per frame, whatever the window
   /// size or display density.
   ///
@@ -1845,7 +1860,12 @@ class _GamePageState extends State<GamePage>
   Future<void> _loadQuality() async {
     try {
       final SharedPreferences prefs = await SharedPreferences.getInstance();
-      final int q = prefs.getInt('quality.v1') ?? 0;
+      // No stored preset means a first run on this machine. Rather than
+      // assuming it can hold HIGH — the assumption that shipped this at 16 and
+      // then 31 fps on hardware that was never the one being measured — start
+      // at BALANCED and let the player move up if it looks too soft. Guessing
+      // low is recoverable in one tap; guessing high reads as a broken game.
+      final int q = prefs.getInt('quality.v1') ?? 1;
       if (!mounted) return;
       setState(() => _quality = q.clamp(0, qualityScales.length - 1));
       _applyQuality();

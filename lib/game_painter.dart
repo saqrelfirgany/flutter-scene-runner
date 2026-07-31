@@ -384,14 +384,25 @@ class _GamePainter extends CustomPainter {
   }
 
   /// Scrolls one scattered set whose per-instance data is (x, phaseZ, scale).
+  /// How many of [n] instances this quality preset draws. The remainder are
+  /// collapsed to a zero scale rather than skipped — an instance left at a
+  /// stale transform would just keep drawing where it was.
+  int _densityCut(int n) =>
+      (n * _GamePageState.qualityDensity[state._quality]).round();
+
   void _scatteredPass(InstancedMesh? mesh, List<vm.Vector3> data, double y,
       double Function(double) wrapZ) {
     if (mesh == null) return;
+    final int drawn = _densityCut(data.length);
     for (int i = 0; i < data.length; i++) {
-      final vm.Vector3 d = data[i];
       _scratch.setIdentity();
-      _scratch.setTranslationRaw(d.x, y, wrapZ(d.y));
-      _scratch.scaleByDouble(d.z, d.z, d.z, 1.0);
+      if (i < drawn) {
+        final vm.Vector3 d = data[i];
+        _scratch.setTranslationRaw(d.x, y, wrapZ(d.y));
+        _scratch.scaleByDouble(d.z, d.z, d.z, 1.0);
+      } else {
+        _scratch.scaleByDouble(0.0, 0.0, 0.0, 1.0);
+      }
       mesh.setInstanceTransform(i, _scratch);
     }
   }
@@ -401,12 +412,17 @@ class _GamePainter extends CustomPainter {
   void _grassPass(InstancedMesh? mesh, List<vm.Vector4> data, double y,
       double Function(double) wrapZ) {
     if (mesh == null) return;
+    final int drawn = _densityCut(data.length);
     for (int i = 0; i < data.length; i++) {
-      final vm.Vector4 d = data[i];
       _scratch.setIdentity();
-      _scratch.setTranslationRaw(d.x, y, wrapZ(d.y));
-      _scratch.rotateY(d.w);
-      _scratch.scaleByDouble(d.z, d.z, d.z, 1.0);
+      if (i < drawn) {
+        final vm.Vector4 d = data[i];
+        _scratch.setTranslationRaw(d.x, y, wrapZ(d.y));
+        _scratch.rotateY(d.w);
+        _scratch.scaleByDouble(d.z, d.z, d.z, 1.0);
+      } else {
+        _scratch.scaleByDouble(0.0, 0.0, 0.0, 1.0);
+      }
       mesh.setInstanceTransform(i, _scratch);
     }
   }
