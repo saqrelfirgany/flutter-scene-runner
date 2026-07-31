@@ -165,16 +165,27 @@ class _GamePageState extends State<GamePage>
   // `renderScale` multiplies the *device* pixel ratio, so on a 2x display HIGH
   // is already 4x the pixels of a 1x one. That is exactly how this shipped at
   // 18 fps after measuring 45 — the measurement ran in a 1x window. Hence
-  // `_autoQuality` below: the preset has to follow the machine, not the
+  // `pixelBudget` below: the resolution has to follow the machine, not the
   // developer's machine.
   static const List<double> qualityScales = <double>[1.0, 0.85, 0.65];
 
-  /// Frame rate under which the game steps its own quality down a notch.
-  static const double autoQualityFloor = 45.0;
+  /// The most fragments the 3D scene may render per frame, whatever the window
+  /// size or display density.
+  ///
+  /// This is the fix for the thing that actually shipped broken: `renderScale`
+  /// multiplies the **device pixel ratio**, so a 1648x914 window on a 2x
+  /// display is 6.0 MP at scale 1.0 — about five times what the same code
+  /// renders in a 1x window, and it measured 16 fps against 47. A fixed preset
+  /// is a bet on one machine.
+  ///
+  /// So the scale is *derived*, not guessed and not reacted to: see
+  /// [_syncRenderScale]. It is deterministic, applies from the very first
+  /// frame, and cannot fail quietly the way an fps-triggered step-down can.
+  /// 1.1 MP is a little under the resolution this scene was measured at.
+  static const double pixelBudget = 1100000.0;
 
-  /// Seconds of play at a poor frame rate before stepping down. Long enough
-  /// that a load hitch or a backgrounded window can't trigger it.
-  static const double autoQualityDelay = 4.0;
+  /// Never upscale past native, and never go softer than this.
+  static const double minRenderScale = 0.35;
   static const List<String> qualityNames = <String>['HIGH', 'BALANCED', 'FAST'];
 
   // Sun down, ambient up. The roadside trees legitimately cast across the road
@@ -452,11 +463,9 @@ class _GamePageState extends State<GamePage>
   // like volume, because it is a device capability choice, not a run setting.
   int _quality = 0;
 
-  // Auto-quality state. `_autoQualityDone` latches once the game has stepped
-  // down on its own or the player has touched the button, so it never fights
-  // a deliberate choice and never oscillates.
-  double _lowFpsFor = 0;
-  bool _autoQualityDone = false;
+  // Last render scale actually pushed to the Scene. Assigning `renderScale`
+  // reallocates the swapchain, so it is only written when it really changes.
+  double _appliedScale = -1;
 
   // floating "+N" score popups (screen space, projected via the last camera)
   Camera? _lastCamera;
@@ -494,7 +503,6 @@ class _GamePageState extends State<GamePage>
     // than 20 fps would report as exactly 20.
     final String? benchLine = _bench?.addFrame(dt);
     if (benchLine != null) debugPrint(benchLine);
-    _autoQuality(dt);
     dt = gm.clampDt(dt, maxFrameDt);
     if (_shakeT > 0) _shakeT = math.max(0, _shakeT - dt);
     _updateParticles(dt);
@@ -1799,51 +1807,34 @@ class _GamePageState extends State<GamePage>
   /// Renders the 3D view below native resolution and upscales on composite.
   /// The one performance lever that is independent of scene content, so it
   /// still helps on a device the geometry budget alone cannot save.
-  void _applyQuality() => _scene.renderScale = qualityScales[_quality];
-
-  /// Steps the render scale down when the machine plainly cannot hold the
-  /// frame rate at the current preset.
+  /// Derives the render scale from the window's **real** pixel count and
+  /// pushes it to the scene. Called at the top of `build`, so it is correct on
+  /// the first frame and re-derives itself on a resize or a monitor change.
   ///
-  /// This exists because a fixed default is a bet on the developer's hardware.
-  /// `renderScale` multiplies the device pixel ratio, so the same preset is
-  /// four times the work on a 2x display — the game shipped at 18 fps on a
-  /// Retina window after measuring 45 in a 1x one.
+  /// `MediaQuery.sizeOf` is in logical pixels; multiplying by the device pixel
+  /// ratio gives what the GPU actually fills. Dividing the budget by that and
+  /// taking the square root converts an area ratio into the linear scale
+  /// `renderScale` wants. Capped at 1.0 — a small window should stay sharp, not
+  /// supersample.
   ///
-  /// Deliberately one-way and one-shot per launch: it never steps back up (an
-  /// oscillating resolution is worse than a slightly soft one), it stops at the
-  /// lowest preset, and it stands down entirely once the player uses the
-  /// quality button, because an explicit choice outranks a guess.
-  void _autoQuality(double rawDt) {
-    if (_autoQualityDone || rawDt <= 0) return;
-    if (_phase != Phase.playing) return; // menus are not representative
-    if (_fps < autoQualityFloor) {
-      _lowFpsFor += rawDt;
-      if (_lowFpsFor >= autoQualityDelay) {
-        if (_quality < qualityScales.length - 1) {
-          setState(() => _quality++);
-          _applyQuality();
-          _saveQuality();
-          _lowFpsFor = 0;
-          // Give the next preset its own full window to prove itself before
-          // stepping again.
-          if (_quality >= qualityScales.length - 1) _autoQualityDone = true;
-        } else {
-          _autoQualityDone = true;
-        }
-      }
-    } else {
-      _lowFpsFor = 0;
-    }
+  /// The HIGH/BALANCED/FAST preset multiplies this rather than replacing it, so
+  /// the button still means something on every machine instead of meaning
+  /// "unplayable" on one and "wasteful" on another.
+  void _syncRenderScale(BuildContext context) {
+    final double dpr = MediaQuery.devicePixelRatioOf(context);
+    final Size size = MediaQuery.sizeOf(context);
+    final double nativePixels = size.width * dpr * size.height * dpr;
+    final double fit = nativePixels <= 0
+        ? 1.0
+        : math.min(1.0, math.sqrt(pixelBudget / nativePixels));
+    final double target =
+        math.max(minRenderScale, fit * qualityScales[_quality]);
+    if ((target - _appliedScale).abs() < 0.01) return;
+    _appliedScale = target;
+    _scene.renderScale = target;
   }
 
-  void _cycleQuality() {
-    // An explicit choice outranks the automatic one — stop second-guessing it.
-    _autoQualityDone = true;
-    setState(() => _quality = (_quality + 1) % qualityScales.length);
-    _applyQuality();
-    _focus.requestFocus();
-    _saveQuality();
-  }
+  void _applyQuality() => _appliedScale = -1; // force a re-derive next build
 
   Future<void> _loadQuality() async {
     try {
@@ -1853,6 +1844,13 @@ class _GamePageState extends State<GamePage>
       setState(() => _quality = q.clamp(0, qualityScales.length - 1));
       _applyQuality();
     } catch (_) {}
+  }
+
+  void _cycleQuality() {
+    setState(() => _quality = (_quality + 1) % qualityScales.length);
+    _applyQuality();
+    _focus.requestFocus();
+    _saveQuality();
   }
 
   Future<void> _saveQuality() async {
@@ -1880,6 +1878,7 @@ class _GamePageState extends State<GamePage>
 
   @override
   Widget build(BuildContext context) {
+    _syncRenderScale(context);
     return Scaffold(
       backgroundColor: cBg,
       body: Focus(
@@ -2142,7 +2141,12 @@ class _GamePageState extends State<GamePage>
               const SizedBox(width: 12),
               // Density is a real draw-call budget here (see CLAUDE.md), so
               // the frame rate is on screen rather than guessed at.
-              Text('${_fps.round()} fps',
+              // The applied render scale is on screen next to the frame rate on
+              // purpose: the resolution is derived from the device now, so
+              // seeing "16 fps" without knowing what it was rendering at is
+              // exactly how this shipped broken.
+              Text(
+                  '${_fps.round()} fps  ·  ${(_appliedScale * 100).round()}%',
                   style: TextStyle(
                       color: _fps < 45 ? cRed : Colors.white38,
                       fontSize: 11,
