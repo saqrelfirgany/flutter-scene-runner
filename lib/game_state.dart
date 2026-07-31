@@ -148,7 +148,13 @@ class _GamePageState extends State<GamePage>
   // the same 42 units (~97 texels/unit either way) while halving the geometry
   // re-submissions. Keep these two in step: raising the count or dropping the
   // resolution without the other brings the blob back.
-  static const int shadowCascades = 2;
+  // One cascade, not two. Two 2048² maps is 8.4 MP of shadow rendering against
+  // a ~1.1 MP screen — the shadow pass was filling seven times the visible
+  // frame. Over only 24 units a single 2048² map still carries ~85 texels per
+  // unit, which is plenty, and it halves both the fill and the geometry
+  // re-submission. The raised bias below is what makes one cascade safe: bias
+  // is the part that does not move with the camera frustum.
+  static const int shadowCascades = 1;
   static const int shadowMapRes = 2048;
   // 24, not 42, and the reason is *visual* — it measured as free either way.
   // At 42 the tall roadside trees are still in shadow range and the sun angle
